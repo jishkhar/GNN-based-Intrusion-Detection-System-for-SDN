@@ -1,0 +1,37 @@
+project_name: gnn_ids_phase1
+seed: 42
+
+data:
+  cicids_clean_glob: data/cicids2017/cleaned/*.csv
+  insdn_clean_glob: data/insdn/cleaned/*.csv
+  graph_output: data/graphs/cicids_graphs.pt
+  label_column: Label
+  src_ip_column: Source IP
+  dst_ip_column: Destination IP
+  timestamp_column: Timestamp
+
+graph:
+  window_seconds: 5
+  step_seconds: 1
+
+baseline:
+  test_size: 0.15
+  val_size: 0.15
+  random_forest_estimators: 200
+
+gnn:
+  hidden_dim: 64
+  heads: 4
+  dropout: 0.3
+  lr: 0.001
+  weight_decay: 0.0001
+  epochs: 40
+  batch_size: 16
+  patience: 8
+
+outputs:
+  baseline_metrics: results/baseline_metrics.json
+  baseline_cm_png: results/baseline_confusion_matrix.png
+  gnn_metrics: results/gnn_metrics.json
+  gnn_cm_png: results/gnn_confusion_matrix.png
+  best_checkpoint: models/checkpoints/best_gat.pt

@@ -1,0 +1,19 @@
+name: gnn-ids-phase1
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pandas
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - networkx
+  - pyyaml
+  - pytorch
+  - pip:
+      - torch-geometric
+      - xgboost
+      - tqdm
