@@ -15,7 +15,9 @@ class GraphSplits:
 
 
 def load_graphs(path: str):
-    graphs = torch.load(path)
+    # These are local, project-generated PyG `Data` objects, so we intentionally
+    # opt out of PyTorch 2.6's `weights_only=True` default for this trusted file.
+    graphs = torch.load(path, weights_only=False)
     if not graphs:
         raise ValueError(f"No graphs loaded from {path}")
     return graphs

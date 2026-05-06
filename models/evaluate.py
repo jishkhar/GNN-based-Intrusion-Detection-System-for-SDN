@@ -18,7 +18,7 @@ def run(graph_path: str, checkpoint_path: str, report_out: str, cm_out: str) -> 
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = GATIntrusionDetector(node_feat_dim=node_feat_dim).to(device)
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
     model.eval()
 
     y_true, y_pred = [], []

@@ -44,20 +44,36 @@ def add_basic_node_features(
     bytes_col: str | None = None,
     duration_col: str | None = None,
 ) -> pd.DataFrame:
-    records = []
-    nodes = pd.Index(df[src_col].astype(str).tolist() + df[dst_col].astype(str).tolist()).unique().tolist()
+    # Vectorized aggregation to avoid per-node filtering (which is O(n^2) for many rows)
+    temp = df.copy()
+    temp[src_col] = temp[src_col].astype(str)
+    temp[dst_col] = temp[dst_col].astype(str)
 
+    nodes = pd.Index(temp[src_col].tolist() + temp[dst_col].tolist()).unique().tolist()
+
+    # Bytes sent/recv: sum if bytes_col present, otherwise use counts
+    if bytes_col and bytes_col in temp.columns:
+        bytes_sent_s = temp.groupby(src_col)[bytes_col].sum()
+        bytes_recv_s = temp.groupby(dst_col)[bytes_col].sum()
+    else:
+        bytes_sent_s = temp.groupby(src_col).size()
+        bytes_recv_s = temp.groupby(dst_col).size()
+
+    # Fan-out: number of unique destinations per source
+    fan_out_s = temp.groupby(src_col)[dst_col].nunique()
+
+    # Average duration per source (if available)
+    if duration_col and duration_col in temp.columns:
+        avg_duration_s = temp.groupby(src_col)[duration_col].mean()
+    else:
+        avg_duration_s = pd.Series(dtype=float)
+
+    records = []
     for node in nodes:
-        sent = df[df[src_col].astype(str) == node]
-        recv = df[df[dst_col].astype(str) == node]
-        bytes_sent = float(sent[bytes_col].sum()) if bytes_col and bytes_col in df.columns else float(len(sent))
-        bytes_recv = float(recv[bytes_col].sum()) if bytes_col and bytes_col in df.columns else float(len(recv))
-        fan_out = int(sent[dst_col].nunique())
-        avg_duration = (
-            float(sent[duration_col].mean())
-            if duration_col and duration_col in df.columns and not sent.empty
-            else 0.0
-        )
+        bytes_sent = float(bytes_sent_s.get(node, 0))
+        bytes_recv = float(bytes_recv_s.get(node, 0))
+        fan_out = int(fan_out_s.get(node, 0))
+        avg_duration = float(avg_duration_s.get(node, 0)) if not avg_duration_s.empty else 0.0
         records.append(
             {
                 "node": str(node),

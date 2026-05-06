@@ -124,7 +124,7 @@ If debugging is needed, run steps one by one.
 ### 8.1 Clean CICIDS data
 
 ```bash
-python preprocessing/clean_data.py \
+python -m preprocessing.clean_data \
   --input-glob "data/cicids2017/raw/*.csv" \
   --output-dir "data/cicids2017/cleaned" \
   --label-column "Label"
@@ -133,7 +133,7 @@ python preprocessing/clean_data.py \
 ### 8.2 Clean InSDN data
 
 ```bash
-python preprocessing/clean_data.py \
+python -m preprocessing.clean_data \
   --input-glob "data/insdn/raw/*.csv" \
   --output-dir "data/insdn/cleaned" \
   --label-column "Label"
@@ -142,7 +142,7 @@ python preprocessing/clean_data.py \
 ### 8.3 Run baselines
 
 ```bash
-python baselines/train_baselines.py \
+python -m baselines.train_baselines \
   --input-glob "data/cicids2017/cleaned/*.csv" \
   --label-col "Label" \
   --metrics-out "results/baseline_metrics.json" \
@@ -152,7 +152,7 @@ python baselines/train_baselines.py \
 ### 8.4 Build graphs
 
 ```bash
-python preprocessing/graph_builder.py \
+python -m preprocessing.graph_builder \
   --input-glob "data/cicids2017/cleaned/*.csv" \
   --output-path "data/graphs/cicids_graphs.pt" \
   --label-col "Label" \
@@ -163,7 +163,7 @@ python preprocessing/graph_builder.py \
 ### 8.5 Train GNN
 
 ```bash
-python models/train_gnn.py \
+python -m models.train_gnn \
   --graph-path "data/graphs/cicids_graphs.pt" \
   --checkpoint-path "models/checkpoints/best_gat.pt" \
   --metrics-path "results/gnn_metrics.json" \
@@ -173,7 +173,7 @@ python models/train_gnn.py \
 ### 8.6 Evaluate GNN
 
 ```bash
-python models/evaluate.py \
+python -m models.evaluate \
   --graph-path "data/graphs/cicids_graphs.pt" \
   --checkpoint-path "models/checkpoints/best_gat.pt" \
   --report-out "results/gnn_classification_report.json" \

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import math
 import os
 from datetime import timedelta
 
@@ -38,6 +39,7 @@ def build_graphs_from_dataframe(
     ts_col: str,
     window_seconds: int = 5,
     step_seconds: int = 1,
+    max_graphs: int | None = None,
 ) -> list[Data]:
     if label_col not in df.columns:
         raise ValueError(f"Label column '{label_col}' missing")
@@ -52,6 +54,18 @@ def build_graphs_from_dataframe(
     start = df["_ts"].min()
     end = df["_ts"].max()
 
+    # Guardrail for very large files: adapt step to cap number of windows/graphs.
+    if max_graphs is not None and max_graphs > 0:
+        total_span_seconds = max(1, int((end - start).total_seconds()))
+        estimated_windows = max(1, total_span_seconds // max(1, step_seconds))
+        if estimated_windows > max_graphs:
+            adaptive_step = max(step_seconds, int(math.ceil(total_span_seconds / max_graphs)))
+            print(
+                f"Adjusting step_seconds from {step_seconds} to {adaptive_step} "
+                f"to cap windows near {max_graphs}."
+            )
+            step_seconds = adaptive_step
+
     graphs: list[Data] = []
     t = start
     while t <= end:
@@ -61,8 +75,9 @@ def build_graphs_from_dataframe(
             t = t + timedelta(seconds=step_seconds)
             continue
 
-        nodes = sorted(set(w[src_col].astype(str).tolist() + w[dst_col].astype(str).tolist()))
-        node_to_idx = {node: i for i, node in enumerate(nodes)}
+        src_vals = w[src_col].astype(str)
+        dst_vals = w[dst_col].astype(str)
+        nodes = sorted(set(src_vals.tolist() + dst_vals.tolist()))
 
         node_features_df = add_basic_node_features(
             w,
@@ -74,18 +89,21 @@ def build_graphs_from_dataframe(
         node_features_df = node_features_df.set_index("node").reindex(nodes).fillna(0.0)
         x = torch.tensor(node_features_df.values, dtype=torch.float32)
 
-        edges = []
-        edge_attr = []
-        for _, row in w.iterrows():
-            s_idx = node_to_idx[str(row[src_col])]
-            d_idx = node_to_idx[str(row[dst_col])]
-            edges.append([s_idx, d_idx])
-            edge_attr.append([float(row[c]) if c in w.columns else 0.0 for c in edge_feature_cols])
+        src_codes = pd.Categorical(src_vals, categories=nodes).codes
+        dst_codes = pd.Categorical(dst_vals, categories=nodes).codes
+        edge_index_np = np.stack([src_codes, dst_codes], axis=0)
+        edge_index = torch.from_numpy(edge_index_np).to(torch.long).contiguous()
 
-        edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
-        edge_attr_t = torch.tensor(edge_attr, dtype=torch.float32)
+        if edge_feature_cols:
+            edge_attr_np = w[edge_feature_cols].to_numpy(dtype=np.float32, copy=False)
+        else:
+            edge_attr_np = np.zeros((len(w), 0), dtype=np.float32)
+        edge_attr_t = torch.from_numpy(edge_attr_np)
 
-        label = int((w[label_col].astype(int) == 1).any())
+        window_labels = w[label_col].astype(int).to_numpy()
+        attack_count = int(window_labels.sum())
+        benign_count = int(len(window_labels) - attack_count)
+        label = int(attack_count > benign_count)
         y = torch.tensor([label], dtype=torch.long)
 
         graph = Data(x=x, edge_index=edge_index, edge_attr=edge_attr_t, y=y)
@@ -103,6 +121,7 @@ def run(
     label_col: str = "Label",
     window_seconds: int = 5,
     step_seconds: int = 1,
+    max_graphs_per_file: int = 5000,
 ) -> None:
     files = sorted(glob.glob(input_glob))
     if not files:
@@ -111,8 +130,23 @@ def run(
     all_graphs: list[Data] = []
     for file_path in files:
         df = pd.read_csv(file_path)
-        src_col = _find_col(df, ["Source IP", "src_ip", "Src IP"])
-        dst_col = _find_col(df, ["Destination IP", "dst_ip", "Dst IP"])
+        
+        # Try to find IP columns first (for packet-level data like InSDN)
+        src_col = None
+        dst_col = None
+        try:
+            src_col = _find_col(df, ["Source IP", "src_ip", "Src IP"])
+            dst_col = _find_col(df, ["Destination IP", "dst_ip", "Dst IP"])
+        except ValueError:
+            # If IP columns not found, use flow-based graph construction
+            # Create synthetic nodes from port numbers or use flow indices
+            src_col = "src_node"
+            dst_col = "dst_node"
+            
+            # Create synthetic source/destination nodes based on ports
+            df[src_col] = "src_" + df.get("Source Port", df.index.astype(str)).astype(str)
+            df[dst_col] = "dst_" + df.get("Destination Port", df.index.astype(str)).astype(str)
+        
         ts_col = _find_col(df, ["Timestamp", "timestamp", "Flow Start Time"]) if any(
             c in {x.lower() for x in df.columns} for c in ["timestamp", "flow start time"]
         ) else "Timestamp"
@@ -125,6 +159,7 @@ def run(
             ts_col=ts_col,
             window_seconds=window_seconds,
             step_seconds=step_seconds,
+            max_graphs=max_graphs_per_file,
         )
         all_graphs.extend(graphs)
         print(f"{os.path.basename(file_path)} -> {len(graphs)} graph snapshots")
@@ -141,6 +176,7 @@ def main() -> None:
     parser.add_argument("--label-col", default="Label")
     parser.add_argument("--window-seconds", type=int, default=5)
     parser.add_argument("--step-seconds", type=int, default=1)
+    parser.add_argument("--max-graphs-per-file", type=int, default=5000)
     args = parser.parse_args()
 
     run(
@@ -149,6 +185,7 @@ def main() -> None:
         label_col=args.label_col,
         window_seconds=args.window_seconds,
         step_seconds=args.step_seconds,
+        max_graphs_per_file=args.max_graphs_per_file,
     )
 
 
