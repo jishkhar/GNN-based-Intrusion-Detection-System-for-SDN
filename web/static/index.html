@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GNN-based IDS Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<!-- Sidebar + Layout wrapper -->
+<div class="ids-layout">
+
+  <!-- Sidebar -->
+  <aside class="ids-sidebar">
+    <div class="ids-logo">
+      <i class="bi bi-shield-shaded"></i>
+      <span>GNN<span class="ids-logo-accent">IDS</span></span>
+    </div>
+    <nav class="ids-nav">
+      <a href="#overview"    class="ids-nav-link active" data-section="overview">
+        <i class="bi bi-grid-1x2"></i> Overview
+      </a>
+      <a href="#performance" class="ids-nav-link" data-section="performance">
+        <i class="bi bi-graph-up-arrow"></i> Performance
+      </a>
+      <a href="#training"    class="ids-nav-link" data-section="training">
+        <i class="bi bi-hourglass-split"></i> Training
+      </a>
+      <a href="#comparison"  class="ids-nav-link" data-section="comparison">
+        <i class="bi bi-bar-chart-grouped"></i> Comparison
+      </a>
+      <a href="#analysis"    class="ids-nav-link" data-section="analysis">
+        <i class="bi bi-pie-chart"></i> Analysis
+      </a>
+      <a href="#info"        class="ids-nav-link" data-section="info">
+        <i class="bi bi-info-circle"></i> Project Info
+      </a>
+    </nav>
+    <div class="ids-sidebar-footer">
+      SDN Intrusion Detection System
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="ids-main">
+
+    <!-- Top bar -->
+    <header class="ids-topbar">
+      <div>
+        <h1 class="ids-page-title">Dashboard</h1>
+        <span class="ids-page-subtitle">GNN Model Performance & Analysis</span>
+      </div>
+      <div class="ids-status-badge">
+        <span class="ids-status-dot"></span> Model Active
+      </div>
+    </header>
+
+    <!-- Loading -->
+    <div id="loadingSpinner" class="ids-loading">
+      <div class="spinner-border text-primary" role="status"></div>
+      <p>Loading metrics data…</p>
+    </div>
+
+    <!-- Content -->
+    <div id="mainContent" style="display:none">
+
+      <!-- ── OVERVIEW ────────────────────────────── -->
+      <section id="overview" class="ids-section">
+        <div class="ids-section-label">Overview</div>
+
+        <!-- KPI row -->
+        <div class="ids-kpi-grid">
+          <div class="ids-kpi ids-kpi--green">
+            <div class="ids-kpi-icon"><i class="bi bi-patch-check"></i></div>
+            <div>
+              <div class="ids-kpi-val" id="overviewBestF1">—</div>
+              <div class="ids-kpi-label">Best Val F1</div>
+            </div>
+          </div>
+          <div class="ids-kpi ids-kpi--blue">
+            <div class="ids-kpi-icon"><i class="bi bi-bullseye"></i></div>
+            <div>
+              <div class="ids-kpi-val" id="overviewAccuracy">—</div>
+              <div class="ids-kpi-label">Test Accuracy</div>
+            </div>
+          </div>
+          <div class="ids-kpi ids-kpi--amber">
+            <div class="ids-kpi-icon"><i class="bi bi-crosshair"></i></div>
+            <div>
+              <div class="ids-kpi-val" id="overviewPrecision">—</div>
+              <div class="ids-kpi-label">Test Precision</div>
+            </div>
+          </div>
+          <div class="ids-kpi ids-kpi--red">
+            <div class="ids-kpi-icon"><i class="bi bi-magnet"></i></div>
+            <div>
+              <div class="ids-kpi-val" id="overviewRecall">—</div>
+              <div class="ids-kpi-label">Test Recall</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Config + distribution cards -->
+        <div class="ids-card-row">
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-gear"></i> Model Configuration</div>
+            <dl class="ids-dl">
+              <dt>Best Epoch</dt>        <dd id="overviewBestEpoch">—</dd>
+              <dt>Decision Threshold</dt><dd id="overviewThreshold">—</dd>
+              <dt>Batch Size</dt>        <dd id="overviewBatchSize">—</dd>
+              <dt>Best Val Loss</dt>     <dd id="overviewBestLoss">—</dd>
+            </dl>
+          </div>
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-diagram-3"></i> Class Distribution</div>
+            <dl class="ids-dl">
+              <dt>Normal Traffic (train)</dt><dd id="overviewNormalCount">—</dd>
+              <dt>Attack Traffic (train)</dt><dd id="overviewAttackCount">—</dd>
+              <dt>Weight — Normal</dt>      <dd id="overviewNormalWeight">—</dd>
+              <dt>Weight — Attack</dt>      <dd id="overviewAttackWeight">—</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="ids-hint">
+          <i class="bi bi-lightbulb"></i>
+          <strong>F1 Score</strong> is the harmonic mean of precision &amp; recall — best metric for imbalanced datasets.
+          A <strong>decision threshold</strong> of 0.73 was tuned to minimise false alarms while maximising attack capture.
+        </div>
+      </section>
+
+      <!-- ── PERFORMANCE ─────────────────────────── -->
+      <section id="performance" class="ids-section">
+        <div class="ids-section-label">Performance</div>
+        <div class="ids-card-row">
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-bar-chart"></i> Test Metrics</div>
+            <canvas id="testMetricsChart" class="ids-canvas"></canvas>
+          </div>
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-sliders"></i> Threshold-Tuned vs Argmax</div>
+            <canvas id="thresholdComparisonChart" class="ids-canvas"></canvas>
+          </div>
+        </div>
+        <div class="ids-card-row">
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-circle-half"></i> Normal Traffic — Per-Class</div>
+            <canvas id="normalClassMetricsChart" class="ids-canvas ids-canvas--sm"></canvas>
+          </div>
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-circle-half"></i> Attack Traffic — Per-Class</div>
+            <canvas id="attackClassMetricsChart" class="ids-canvas ids-canvas--sm"></canvas>
+          </div>
+        </div>
+        <div class="ids-card">
+          <div class="ids-card-header"><i class="bi bi-table"></i> Detailed Test Results</div>
+          <div class="table-responsive">
+            <table class="ids-table">
+              <thead>
+                <tr>
+                  <th>Metric</th>
+                  <th>Threshold-Tuned (0.73)</th>
+                  <th>Argmax (0.5)</th>
+                  <th>Δ Difference</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td>Accuracy</td> <td id="tableAccuracyTuned">—</td><td id="tableAccuracyArgmax">—</td><td id="tableAccuracyDiff" class="ids-diff">—</td></tr>
+                <tr><td>Precision</td><td id="tablePrecisionTuned">—</td><td id="tablePrecisionArgmax">—</td><td id="tablePrecisionDiff" class="ids-diff">—</td></tr>
+                <tr><td>Recall</td>   <td id="tableRecallTuned">—</td>  <td id="tableRecallArgmax">—</td>  <td id="tableRecallDiff" class="ids-diff">—</td></tr>
+                <tr><td>F1 Score</td> <td id="tableF1Tuned">—</td>      <td id="tableF1Argmax">—</td>      <td id="tableF1Diff" class="ids-diff">—</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── TRAINING ────────────────────────────── -->
+      <section id="training" class="ids-section">
+        <div class="ids-section-label">Training History</div>
+        <div class="ids-card-row">
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-graph-down"></i> Training &amp; Validation Loss</div>
+            <canvas id="lossHistoryChart" class="ids-canvas"></canvas>
+          </div>
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-graph-up"></i> Accuracy Over Epochs</div>
+            <canvas id="accuracyHistoryChart" class="ids-canvas"></canvas>
+          </div>
+        </div>
+        <div class="ids-card-row">
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-graph-up"></i> F1 Score Over Epochs</div>
+            <canvas id="f1HistoryChart" class="ids-canvas"></canvas>
+          </div>
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-bezier2"></i> Precision &amp; Recall Over Epochs</div>
+            <canvas id="precisionRecallHistoryChart" class="ids-canvas"></canvas>
+          </div>
+        </div>
+        <div class="ids-card-row">
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-info-circle"></i> Training Statistics</div>
+            <dl class="ids-dl">
+              <dt>Total Epochs</dt>    <dd id="trainingTotalEpochs">—</dd>
+              <dt>Best Epoch</dt>      <dd id="trainingBestEpoch">—</dd>
+              <dt>Initial Loss</dt>    <dd id="trainingInitialLoss">—</dd>
+              <dt>Best Val Loss</dt>   <dd id="trainingBestValLoss">—</dd>
+              <dt>Improvement</dt>     <dd id="trainingImprovement">—</dd>
+            </dl>
+          </div>
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-trophy"></i> Best Epoch Snapshot</div>
+            <dl class="ids-dl">
+              <dt>Epoch</dt>           <dd id="trainingBestEpochNumber">—</dd>
+              <dt>Validation F1</dt>   <dd id="trainingBestF1">—</dd>
+              <dt>Validation Loss</dt> <dd id="trainingBestLoss">—</dd>
+              <dt>Test Accuracy</dt>   <dd id="trainingBestAccuracy">—</dd>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── COMPARISON ─────────────────────────── -->
+      <section id="comparison" class="ids-section">
+        <div class="ids-section-label">GNN vs Baselines</div>
+        <div class="ids-3col">
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-bar-chart"></i> Accuracy</div>
+            <canvas id="accuracyComparisonChart" class="ids-canvas ids-canvas--sm"></canvas>
+          </div>
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-bar-chart"></i> F1 Score</div>
+            <canvas id="f1ComparisonChart" class="ids-canvas ids-canvas--sm"></canvas>
+          </div>
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-bar-chart"></i> ROC-AUC</div>
+            <canvas id="rocAucComparisonChart" class="ids-canvas ids-canvas--sm"></canvas>
+          </div>
+        </div>
+        <div class="ids-card">
+          <div class="ids-card-header"><i class="bi bi-table"></i> Full Comparison</div>
+          <div class="table-responsive">
+            <table class="ids-table">
+              <thead>
+                <tr>
+                  <th>Model</th><th>Accuracy</th><th>Precision</th><th>Recall</th><th>F1</th><th>ROC-AUC</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr class="ids-row--highlight">
+                  <td><i class="bi bi-diagram-3"></i> <strong>GNN (ours)</strong></td>
+                  <td id="comparisonGnnAccuracy">—</td>
+                  <td id="comparisonGnnPrecision">—</td>
+                  <td id="comparisonGnnRecall">—</td>
+                  <td id="comparisonGnnF1">—</td>
+                  <td>—</td>
+                </tr>
+                <tr>
+                  <td><i class="bi bi-tree"></i> Random Forest</td>
+                  <td id="comparisonRfAccuracy">—</td>
+                  <td id="comparisonRfPrecision">—</td>
+                  <td id="comparisonRfRecall">—</td>
+                  <td id="comparisonRfF1">—</td>
+                  <td id="comparisonRfRocAuc">—</td>
+                </tr>
+                <tr>
+                  <td><i class="bi bi-lightning"></i> XGBoost</td>
+                  <td id="comparisonXgbAccuracy">—</td>
+                  <td id="comparisonXgbPrecision">—</td>
+                  <td id="comparisonXgbRecall">—</td>
+                  <td id="comparisonXgbF1">—</td>
+                  <td id="comparisonXgbRocAuc">—</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ids-hint">
+          <i class="bi bi-lightbulb"></i>
+          GNN captures coordinated multi-flow attack patterns by modelling network topology as graphs — something Random Forest and XGBoost, which treat each flow independently, cannot do.
+        </div>
+      </section>
+
+      <!-- ── ANALYSIS ───────────────────────────── -->
+      <section id="analysis" class="ids-section">
+        <div class="ids-section-label">Detailed Analysis</div>
+        <div class="ids-card-row">
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-pie-chart"></i> Test Set Class Distribution</div>
+            <canvas id="classDistributionChart" class="ids-canvas ids-canvas--sm"></canvas>
+          </div>
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-pie-chart"></i> Model Prediction Distribution</div>
+            <canvas id="predictionDistributionChart" class="ids-canvas ids-canvas--sm"></canvas>
+          </div>
+        </div>
+        <div class="ids-card-row">
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-pentagon"></i> Per-Class Radar</div>
+            <canvas id="radarChart" class="ids-canvas"></canvas>
+          </div>
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-bar-chart"></i> Macro vs Weighted Averages</div>
+            <canvas id="macroWeightedChart" class="ids-canvas"></canvas>
+          </div>
+        </div>
+        <div class="ids-card">
+          <div class="ids-card-header"><i class="bi bi-table"></i> Per-Class Metrics</div>
+          <div class="table-responsive">
+            <table class="ids-table">
+              <thead>
+                <tr><th>Class</th><th>Label</th><th>Precision</th><th>Recall</th><th>F1</th><th>Support</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><span class="ids-badge ids-badge--green">0</span></td>
+                  <td>Normal Traffic</td>
+                  <td id="analysisPrecisionClass0">—</td><td id="analysisRecallClass0">—</td>
+                  <td id="analysisF1Class0">—</td><td id="analysisSupportClass0">—</td>
+                </tr>
+                <tr>
+                  <td><span class="ids-badge ids-badge--red">1</span></td>
+                  <td>Attack Traffic</td>
+                  <td id="analysisPrecisionClass1">—</td><td id="analysisRecallClass1">—</td>
+                  <td id="analysisF1Class1">—</td><td id="analysisSupportClass1">—</td>
+                </tr>
+                <tr class="ids-row--muted">
+                  <td colspan="2"><strong>Macro Average</strong></td>
+                  <td id="analysisMacroPrecision">—</td><td id="analysisMacroRecall">—</td>
+                  <td id="analysisMacroF1">—</td><td id="analysisMacroSupport">—</td>
+                </tr>
+                <tr class="ids-row--muted">
+                  <td colspan="2"><strong>Weighted Average</strong></td>
+                  <td id="analysisWeightedPrecision">—</td><td id="analysisWeightedRecall">—</td>
+                  <td id="analysisWeightedF1">—</td><td id="analysisWeightedSupport">—</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── PROJECT INFO ───────────────────────── -->
+      <section id="info" class="ids-section">
+        <div class="ids-section-label">Project Info</div>
+        <div class="ids-card-row">
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-diagram-3"></i> Model Architecture</div>
+            <p class="ids-body">Graph Attention Network (GAT) trained on network traffic flows represented as dynamic graphs. Learns to detect coordinated multi-flow attack patterns that traditional ML models miss.</p>
+            <dl class="ids-dl ids-dl--compact">
+              <dt>Input</dt> <dd>79 features per flow (CICIDS2017)</dd>
+              <dt>Output</dt><dd>Binary — Normal / Attack + confidence</dd>
+            </dl>
+          </div>
+          <div class="ids-card">
+            <div class="ids-card-header"><i class="bi bi-database"></i> Dataset</div>
+            <dl class="ids-dl">
+              <dt>Dataset</dt>    <dd>CICIDS2017</dd>
+              <dt>Features</dt>   <dd>79 network flow features</dd>
+              <dt>Train set</dt>  <dd>27,836 samples (23,195 normal / 4,641 attack)</dd>
+              <dt>Test set</dt>   <dd>5,965 samples (4,970 normal / 995 attack)</dd>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+    </div><!-- /mainContent -->
+  </main>
+</div><!-- /ids-layout -->
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

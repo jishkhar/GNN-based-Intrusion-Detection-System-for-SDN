@@ -1,0 +1,389 @@
+/* ── Reset & Base ─────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #0f1117;
+  --surface:  #1a1d27;
+  --surface2: #22263a;
+  --border:   rgba(255,255,255,0.07);
+  --border2:  rgba(255,255,255,0.13);
+  --text:     #e8eaf2;
+  --muted:    #8b90a8;
+  --accent:   #4f6ef7;
+  --accent2:  #6c8aff;
+  --green:    #22c55e;
+  --green-bg: rgba(34,197,94,0.12);
+  --blue:     #3b82f6;
+  --blue-bg:  rgba(59,130,246,0.12);
+  --amber:    #f59e0b;
+  --amber-bg: rgba(245,158,11,0.12);
+  --red:      #ef4444;
+  --red-bg:   rgba(239,68,68,0.12);
+  --radius:   12px;
+  --radius-sm:8px;
+  --sidebar-w:220px;
+  --topbar-h: 64px;
+  --font: 'Inter', 'Segoe UI', system-ui, sans-serif;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+/* ── Layout ───────────────────────────────────────── */
+.ids-layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+/* ── Sidebar ──────────────────────────────────────── */
+.ids-sidebar {
+  width: var(--sidebar-w);
+  min-height: 100vh;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.ids-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 24px 20px 20px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+.ids-logo i { font-size: 24px; color: var(--accent2); }
+.ids-logo-accent { color: var(--accent2); }
+
+.ids-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 12px;
+  flex: 1;
+}
+
+.ids-nav-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13.5px;
+  font-weight: 500;
+  transition: background 0.15s, color 0.15s;
+}
+.ids-nav-link i { font-size: 16px; width: 18px; text-align: center; }
+.ids-nav-link:hover { background: var(--surface2); color: var(--text); }
+.ids-nav-link.active { background: rgba(79,110,247,0.15); color: var(--accent2); }
+
+.ids-sidebar-footer {
+  padding: 16px 20px;
+  font-size: 11px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
+
+/* ── Main ─────────────────────────────────────────── */
+.ids-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Top Bar ──────────────────────────────────────── */
+.ids-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  height: var(--topbar-h);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 32px;
+  background: rgba(15,17,23,0.85);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+
+.ids-page-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1;
+  margin-bottom: 2px;
+}
+.ids-page-subtitle {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ids-status-badge {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--green);
+  background: var(--green-bg);
+  padding: 5px 14px;
+  border-radius: 100px;
+  border: 1px solid rgba(34,197,94,0.25);
+}
+.ids-status-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0%,100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+
+/* ── Loading ──────────────────────────────────────── */
+.ids-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 80px 32px;
+  color: var(--muted);
+}
+
+/* ── Sections ─────────────────────────────────────── */
+.ids-section {
+  padding: 36px 32px;
+  border-bottom: 1px solid var(--border);
+}
+.ids-section:last-child { border-bottom: none; }
+
+.ids-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--accent2);
+  margin-bottom: 24px;
+}
+
+/* ── KPI Cards ────────────────────────────────────── */
+.ids-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.ids-kpi {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  transition: border-color 0.2s, transform 0.15s;
+}
+.ids-kpi:hover { border-color: var(--border2); transform: translateY(-2px); }
+
+.ids-kpi-icon {
+  width: 44px; height: 44px;
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px;
+  flex-shrink: 0;
+}
+.ids-kpi--green .ids-kpi-icon { background: var(--green-bg); color: var(--green); }
+.ids-kpi--blue  .ids-kpi-icon { background: var(--blue-bg);  color: var(--blue);  }
+.ids-kpi--amber .ids-kpi-icon { background: var(--amber-bg); color: var(--amber); }
+.ids-kpi--red   .ids-kpi-icon { background: var(--red-bg);   color: var(--red);   }
+
+.ids-kpi-val {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  color: var(--text);
+  line-height: 1.1;
+}
+.ids-kpi-label {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-top: 3px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* ── Card primitives ──────────────────────────────── */
+.ids-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 22px;
+  transition: border-color 0.2s;
+}
+.ids-card:hover { border-color: var(--border2); }
+
+.ids-card-header {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ids-card-header i { color: var(--accent2); font-size: 15px; }
+
+.ids-card-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.ids-3col {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+/* ── DL (definition list) ─────────────────────────── */
+.ids-dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px 16px;
+}
+.ids-dl dt {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+  padding-top: 1px;
+  white-space: nowrap;
+}
+.ids-dl dd {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  text-align: right;
+}
+.ids-dl--compact { gap: 7px 16px; margin-top: 12px; }
+
+/* ── Canvas ───────────────────────────────────────── */
+.ids-canvas { max-height: 280px; width: 100% !important; }
+.ids-canvas--sm { max-height: 220px; }
+
+/* ── Tables ───────────────────────────────────────── */
+.ids-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  color: var(--text);
+}
+.ids-table thead th {
+  background: var(--surface2);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.ids-table tbody td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.ids-table tbody tr:last-child td { border-bottom: none; }
+.ids-table tbody tr:hover td { background: var(--surface2); }
+
+.ids-row--highlight td { background: rgba(79,110,247,0.07); }
+.ids-row--highlight td:first-child { border-left: 3px solid var(--accent); }
+.ids-row--muted td { background: rgba(255,255,255,0.02); color: var(--muted); }
+
+.ids-diff { font-family: monospace; font-size: 12.5px; color: var(--green); }
+
+/* ── Badges ───────────────────────────────────────── */
+.ids-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px; height: 24px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.ids-badge--green { background: var(--green-bg); color: var(--green); }
+.ids-badge--red   { background: var(--red-bg);   color: var(--red);   }
+
+/* ── Hint box ─────────────────────────────────────── */
+.ids-hint {
+  background: rgba(79,110,247,0.06);
+  border: 1px solid rgba(79,110,247,0.18);
+  border-radius: var(--radius-sm);
+  padding: 14px 18px;
+  font-size: 13px;
+  color: var(--muted);
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 16px;
+  line-height: 1.7;
+}
+.ids-hint i { color: var(--accent2); font-size: 16px; flex-shrink: 0; margin-top: 1px; }
+.ids-hint strong { color: var(--text); font-weight: 600; }
+
+/* ── Body text ────────────────────────────────────── */
+.ids-body {
+  font-size: 13.5px;
+  color: var(--muted);
+  line-height: 1.7;
+  margin-bottom: 14px;
+}
+
+/* ── Scrollbar ────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
+
+/* ── Responsive ───────────────────────────────────── */
+@media (max-width: 768px) {
+  .ids-sidebar { display: none; }
+  .ids-topbar  { padding: 0 16px; }
+  .ids-section { padding: 24px 16px; }
+  .ids-card-row, .ids-3col { grid-template-columns: 1fr; }
+  .ids-kpi-grid { grid-template-columns: 1fr 1fr; }
+  .ids-kpi-val { font-size: 22px; }
+}
+@media (max-width: 480px) {
+  .ids-kpi-grid { grid-template-columns: 1fr; }
+}

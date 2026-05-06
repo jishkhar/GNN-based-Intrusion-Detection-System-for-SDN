@@ -1,4 +1,4 @@
-# Execution Guide (Phase 1 MVP)
+ # Execution Guide (Phase 1 MVP)
 
 This document explains how to run the Phase 1 MVP end-to-end for the GNN-based IDS project.
 
