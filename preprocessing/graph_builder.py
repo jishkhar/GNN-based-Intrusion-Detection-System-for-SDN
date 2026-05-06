@@ -49,7 +49,7 @@ def build_graphs_from_dataframe(
     df["_ts"] = timestamp
     df = df.sort_values("_ts").reset_index(drop=True)
 
-    edge_feature_cols = select_edge_feature_columns(df)
+    edge_feature_cols = select_edge_feature_columns(df, exclude_columns=[label_col])
 
     start = df["_ts"].min()
     end = df["_ts"].max()

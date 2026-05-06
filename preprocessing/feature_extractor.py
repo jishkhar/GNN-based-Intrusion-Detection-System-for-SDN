@@ -14,7 +14,12 @@ def _resolve_column(df: pd.DataFrame, candidates: Iterable[str]) -> str | None:
     return None
 
 
-def select_edge_feature_columns(df: pd.DataFrame, max_features: int = 12) -> list[str]:
+def select_edge_feature_columns(
+    df: pd.DataFrame,
+    max_features: int = 12,
+    exclude_columns: Iterable[str] | None = None,
+) -> list[str]:
+    excluded = {c.lower() for c in (exclude_columns or [])}
     preferred = [
         "Flow Duration",
         "Total Fwd Packets",
@@ -28,11 +33,19 @@ def select_edge_feature_columns(df: pd.DataFrame, max_features: int = 12) -> lis
         "RST Flag Count",
         "Protocol",
     ]
-    selected = [c for c in preferred if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+    selected = [
+        c
+        for c in preferred
+        if c.lower() not in excluded and c in df.columns and pd.api.types.is_numeric_dtype(df[c])
+    ]
     if len(selected) >= max_features:
         return selected[:max_features]
 
-    numeric_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in selected]
+    numeric_cols = [
+        c
+        for c in df.select_dtypes(include=[np.number]).columns
+        if c not in selected and c.lower() not in excluded
+    ]
     selected.extend(numeric_cols[: max(0, max_features - len(selected))])
     return selected
 

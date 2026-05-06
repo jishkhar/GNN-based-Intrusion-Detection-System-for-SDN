@@ -14,41 +14,23 @@ from models.gat_model import GATIntrusionDetector
 from preprocessing.graph_dataset import create_loaders
 
 
-def _eval(model, loader, device):
+def _scores(model, loader, device):
     model.eval()
-    ys, ps = [], []
-    losses = []
+    ys, scores = [], []
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
             out = model(batch)
-            pred = out.argmax(dim=1)
+            prob_attack = torch.softmax(out, dim=1)[:, 1]
             ys.extend(batch.y.view(-1).cpu().tolist())
-            ps.extend(pred.cpu().tolist())
-    return {
-        "accuracy": float(accuracy_score(ys, ps)),
-        "precision": float(precision_score(ys, ps, zero_division=0)),
-        "recall": float(recall_score(ys, ps, zero_division=0)),
-        "f1": float(f1_score(ys, ps, zero_division=0)),
-    }
+            scores.extend(prob_attack.cpu().tolist())
+    return ys, scores
 
 
-def _eval_with_loss(model, loader, device, criterion):
-    model.eval()
-    ys, ps = [], []
-    losses = []
-    with torch.no_grad():
-        for batch in loader:
-            batch = batch.to(device)
-            out = model(batch)
-            pred = out.argmax(dim=1)
-            y = batch.y.view(-1)
-            losses.append(float(criterion(out, y).item()))
-            ys.extend(y.cpu().tolist())
-            ps.extend(pred.cpu().tolist())
-    report = classification_report(ys, ps, output_dict=True, zero_division=0)
+def _metrics_from_scores(ys, scores, threshold: float = 0.5):
+    ps = [int(score >= threshold) for score in scores]
+    report = classification_report(ys, ps, labels=[0, 1], output_dict=True, zero_division=0)
     return {
-        "loss": float(np.mean(losses)) if losses else 0.0,
         "accuracy": float(accuracy_score(ys, ps)),
         "precision": float(precision_score(ys, ps, zero_division=0)),
         "recall": float(recall_score(ys, ps, zero_division=0)),
@@ -64,33 +46,96 @@ def _eval_with_loss(model, loader, device, criterion):
             "f1": float(report["1"]["f1-score"]),
         },
         "prediction_counts": {str(k): int(v) for k, v in Counter(ps).items()},
+        "threshold": float(threshold),
     }
 
 
-def run(graph_path: str, checkpoint_path: str, metrics_path: str, epochs: int = 40, seed: int = 42) -> None:
+def _eval_with_loss(model, loader, device, criterion):
+    model.eval()
+    ys, scores = [], []
+    losses = []
+    with torch.no_grad():
+        for batch in loader:
+            batch = batch.to(device)
+            out = model(batch)
+            prob_attack = torch.softmax(out, dim=1)[:, 1]
+            y = batch.y.view(-1)
+            losses.append(float(criterion(out, y).item()))
+            ys.extend(y.cpu().tolist())
+            scores.extend(prob_attack.cpu().tolist())
+    metrics = _metrics_from_scores(ys, scores, threshold=0.5)
+    return {
+        "loss": float(np.mean(losses)) if losses else 0.0,
+        **metrics,
+    }
+
+
+def _best_threshold(ys, scores) -> tuple[float, dict]:
+    thresholds = np.linspace(0.05, 0.95, 91)
+    best_threshold = 0.5
+    best_metrics = _metrics_from_scores(ys, scores, threshold=best_threshold)
+    for threshold in thresholds:
+        metrics = _metrics_from_scores(ys, scores, threshold=float(threshold))
+        if (metrics["f1"], metrics["recall"], metrics["accuracy"]) > (
+            best_metrics["f1"],
+            best_metrics["recall"],
+            best_metrics["accuracy"],
+        ):
+            best_threshold = float(threshold)
+            best_metrics = metrics
+    return best_threshold, best_metrics
+
+
+def run(
+    graph_path: str,
+    checkpoint_path: str,
+    metrics_path: str,
+    epochs: int = 40,
+    seed: int = 42,
+    batch_size: int = 128,
+) -> None:
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    splits = create_loaders(graph_path=graph_path, batch_size=16, test_size=0.15, val_size=0.15, seed=seed)
+    splits = create_loaders(
+        graph_path=graph_path,
+        batch_size=batch_size,
+        test_size=0.15,
+        val_size=0.15,
+        seed=seed,
+    )
     sample_batch = next(iter(splits.train_loader))
     node_feat_dim = sample_batch.x.shape[1]
+    edge_feat_dim = sample_batch.edge_attr.shape[1] if getattr(sample_batch, "edge_attr", None) is not None else 0
 
     train_labels = [int(graph.y.item()) for graph in splits.train_loader.dataset]
     class_counts = Counter(train_labels)
     total_count = sum(class_counts.values())
+    # Use a mild inverse-frequency weighting; threshold tuning handles the final
+    # precision/recall trade-off without forcing attack-only predictions.
     class_weights = torch.tensor(
-        [total_count / (2.0 * max(class_counts.get(cls, 1), 1)) for cls in range(2)],
+        [np.sqrt(total_count / (2.0 * max(class_counts.get(cls, 1), 1))) for cls in range(2)],
         dtype=torch.float32,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = GATIntrusionDetector(node_feat_dim=node_feat_dim).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    model_config = {
+        "node_feat_dim": node_feat_dim,
+        "edge_feat_dim": edge_feat_dim,
+        "hidden_dim": 64,
+        "heads": 4,
+        "dropout": 0.25,
+        "num_classes": 2,
+    }
+    model = GATIntrusionDetector(**model_config).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=7e-4, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
 
-    best_val_loss = float("inf")
     best_val_f1 = -1.0
-    patience = 8
+    best_val_loss = float("inf")
+    best_threshold_value = 0.5
+    best_epoch = 0
+    patience = 10
     min_delta = 1e-4
     wait = 0
     history = []
@@ -105,39 +150,81 @@ def run(graph_path: str, checkpoint_path: str, metrics_path: str, epochs: int = 
             y = batch.y.view(-1)
             loss = criterion(out, y)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
             optimizer.step()
             losses.append(float(loss.item()))
 
         train_loss = float(np.mean(losses)) if losses else 0.0
         val_metrics = _eval_with_loss(model, splits.val_loader, device, criterion)
-        history.append({"epoch": epoch, "train_loss": train_loss, **val_metrics})
+        val_y, val_scores = _scores(model, splits.val_loader, device)
+        val_threshold, threshold_metrics = _best_threshold(val_y, val_scores)
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "argmax": val_metrics,
+                "threshold_tuned": threshold_metrics,
+            }
+        )
 
         print(
             f"Epoch {epoch:03d} | loss={train_loss:.4f} | val_loss={val_metrics['loss']:.4f} | "
-            f"val_f1={val_metrics['f1']:.4f} | pred_counts={val_metrics['prediction_counts']}"
+            f"argmax_f1={val_metrics['f1']:.4f} | tuned_f1={threshold_metrics['f1']:.4f} | "
+            f"tuned_recall={threshold_metrics['recall']:.4f} | threshold={val_threshold:.2f} | "
+            f"pred_counts={threshold_metrics['prediction_counts']}"
         )
 
-        if val_metrics["loss"] < (best_val_loss - min_delta):
+        is_better = (
+            threshold_metrics["f1"] > best_val_f1 + min_delta
+            or (
+                abs(threshold_metrics["f1"] - best_val_f1) <= min_delta
+                and val_metrics["loss"] < best_val_loss - min_delta
+            )
+        )
+        if is_better:
             best_val_loss = val_metrics["loss"]
-            best_val_f1 = val_metrics["f1"]
+            best_val_f1 = threshold_metrics["f1"]
+            best_threshold_value = val_threshold
+            best_epoch = epoch
             wait = 0
             os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-            torch.save(model.state_dict(), checkpoint_path)
+            torch.save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "model_config": model_config,
+                    "feature_stats": splits.feature_stats.to_dict() if splits.feature_stats else None,
+                    "decision_threshold": best_threshold_value,
+                    "best_val_metrics": threshold_metrics,
+                    "best_val_loss": best_val_loss,
+                    "epoch": best_epoch,
+                    "seed": seed,
+                },
+                checkpoint_path,
+            )
         else:
             wait += 1
             if wait >= patience:
                 print("Early stopping triggered.")
                 break
 
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
-    test_metrics = _eval(model, splits.test_loader, device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    test_y, test_scores = _scores(model, splits.test_loader, device)
+    test_metrics = _metrics_from_scores(test_y, test_scores, threshold=best_threshold_value)
+    argmax_test_metrics = _metrics_from_scores(test_y, test_scores, threshold=0.5)
     out = {
         "best_val_f1": best_val_f1,
         "best_val_loss": best_val_loss,
+        "best_epoch": best_epoch,
+        "decision_threshold": best_threshold_value,
+        "batch_size": batch_size,
         "train_class_counts": {str(k): int(v) for k, v in class_counts.items()},
         "class_weights": class_weights.tolist(),
         "test": test_metrics,
+        "argmax_test": argmax_test_metrics,
         "history": history,
+        "model_config": model_config,
+        "feature_stats": splits.feature_stats.to_dict() if splits.feature_stats else None,
         "checkpoint": checkpoint_path,
     }
 
@@ -154,6 +241,7 @@ def main() -> None:
     parser.add_argument("--metrics-path", default="results/gnn_metrics.json")
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--batch-size", type=int, default=128)
     args = parser.parse_args()
     run(
         graph_path=args.graph_path,
@@ -161,6 +249,7 @@ def main() -> None:
         metrics_path=args.metrics_path,
         epochs=args.epochs,
         seed=args.seed,
+        batch_size=args.batch_size,
     )
 
 

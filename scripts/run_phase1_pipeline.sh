@@ -34,6 +34,7 @@ python -m models.train_gnn \
   --graph-path "data/graphs/cicids_graphs.pt" \
   --checkpoint-path "models/checkpoints/best_gat.pt" \
   --metrics-path "results/gnn_metrics.json" \
+  --batch-size 128 \
   --epochs 40
 
 echo "[6/6] Evaluating GNN"
