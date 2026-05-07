@@ -6,7 +6,7 @@ echo "🚀 Starting GNN-based IDS Dashboard..."
 echo ""
 
 # Navigate to web directory
-cd "$(dirname "$0")/web" || exit 1
+cd "$(dirname "$0")" || exit 1
 
 # Check if virtual environment exists
 if [ ! -d "../.venv" ]; then
