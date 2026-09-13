@@ -297,3 +297,85 @@ bash web/run.sh
 - [ ] `/api/health` returns all result files as `true`
 - [ ] Charts and metric cards load in browser
 - [ ] Results ready for Phase 1 guide review
+
+---
+
+# Phase 2: Topology GNN, Live SDN Integration and Mitigation
+
+Phase 2 replaces the synthetic CICIDS graphs with real host-to-host graphs (InSDN), adds a per-host
+attacker head, and connects the model to a live SDN (os-ken controller + Mininet) that blocks attackers
+automatically. Every script accepts `--config configs/phase2.yaml`; command-line flags override it.
+
+## 12) Extra prerequisites
+
+- Docker, with your user in the `docker` group (for the Mininet lab), or an Ubuntu 22.04 VM
+- `pip install -r requirements.txt -r web/requirements.txt` (pins exact versions; includes pytest)
+
+## 13) Offline pipeline
+
+```bash
+# InSDN must be cleaned with the Phase 2 cleaner (keeps the attack type, fixes "Normal" = benign)
+python -m preprocessing.clean_data --input-glob "data/insdn/raw/*.csv" --output-dir data/insdn/cleaned
+
+PYTHON=.venv/bin/python bash scripts/run_phase2_training.sh      # ~70 min with ablations
+PYTHON=.venv/bin/python bash scripts/run_phase2_training.sh --skip-ablations   # ~15 min
+```
+
+| Step | Command | Output |
+|---|---|---|
+| Graphs | `python -m preprocessing.graph_builder_v2 --config configs/phase2.yaml` | `data/graphs/insdn_v2.pt` |
+| Baselines | `python -m baselines.train_baselines_v2 --config configs/phase2.yaml` | `results/phase2/baselines_v2.json` |
+| GNN | `python -m models.train_gnn_v2 --config configs/phase2.yaml` | `models/checkpoints/gnn_v2_gat.pt`, `results/phase2/gnn_v2_gat.json` |
+| Ablations | `--conv-type gcn/sage`, `--no-edge-features`, other window sizes | `results/phase2/ablation_*.json` |
+| Export | `python -m models.export --config configs/phase2.yaml` | `models/gat_ids.pt` (+ `.json` bundle) |
+| EDA | `python scripts/eda_insdn.py` | `Docs/eda_summary.md`, `results/phase2/eda/` |
+
+## 14) Tests and live-path checks (no Mininet needed)
+
+```bash
+python -m pytest tests -q                     # unit + integration tests
+python scripts/replay_flows.py                # held-out flows through the live IDS
+python scripts/benchmark_latency.py           # latency per window size, CPU and GPU
+```
+
+## 15) Live SDN lab
+
+Full details: `Docs/sdn_lab_setup.md`.
+
+```bash
+docker build -t gnn-ids-lab -f docker/Dockerfile.sdn-lab docker/     # once
+KEEP_IDS=1 bash scripts/run_phase2_demo.sh                           # all scenarios, dashboard stays up
+```
+
+Start order used by the script (and for a manual demo):
+1. IDS API + dashboard on the host: `cd web && IDS_API_KEY=<key> python -m uvicorn app:app --port 3000`
+2. Controller in the lab container: `python3 controller/run_controller.py --api-key <key>`
+3. Mininet + traffic: `python3 scripts/inject_attack.py --scenario ddos`
+4. Watch http://127.0.0.1:3000/live: alert, rule installed, attack traffic drops.
+
+Environment variables of the IDS API: `IDS_API_KEY`, `IDS_CONFIG`, `IDS_LOG_DIR`, `IDS_RECORD_FLOWS`,
+`IDS_MITIGATION=0` (detect only), `IDS_CORS_ORIGINS`.
+
+## 16) Fine-tuning on lab traffic
+
+```bash
+COLLECT=1 REPEAT=5 SCENARIO=all SESSION=data/mininet/collect1 bash scripts/run_phase2_demo.sh   # ~40 min
+bash scripts/finetune_on_lab.sh data/mininet/collect1                                          # ~15 min
+```
+
+`run_phase2_training.sh` exports the InSDN-only model to `models/gat_ids_insdn_only.pt` and never
+overwrites `models/gat_ids.pt` (the live model); `finetune_on_lab.sh` installs the fine-tuned model there.
+
+## 17) Results report
+
+```bash
+python scripts/make_phase2_report.py          # -> results/phase2/final_results.md
+```
+
+## 18) Phase 2 checklist
+
+- [ ] `pytest` passes
+- [ ] `results/phase2/final_results.md` generated
+- [ ] Lab `pingall` works through the IDS controller
+- [ ] Demo: attack detected, rule installed, attack traffic dropped ≥ 70 %
+- [ ] No benign host blocked in benign-only runs

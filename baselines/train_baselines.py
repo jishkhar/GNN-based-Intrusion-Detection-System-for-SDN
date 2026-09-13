@@ -22,6 +22,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from common.config import parse_args_with_config, run_metadata
+
 try:
     from xgboost import XGBClassifier
 
@@ -69,12 +71,21 @@ def _metrics(y_true, y_pred, y_prob=None):
     return m
 
 
-def run(input_glob: str, label_col: str, metrics_out: str, cm_out: str, seed: int = 42) -> None:
+def run(
+    input_glob: str,
+    label_col: str,
+    metrics_out: str,
+    cm_out: str,
+    seed: int = 42,
+    test_size: float = 0.2,
+    rf_estimators: int = 200,
+    metadata: dict | None = None,
+) -> None:
     df = _load_csvs(input_glob)
     X, y, feature_cols = _prepare_xy(df, label_col=label_col)
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=seed, stratify=y
+        X, y, test_size=test_size, random_state=seed, stratify=y
     )
 
     rf = Pipeline(
@@ -83,7 +94,7 @@ def run(input_glob: str, label_col: str, metrics_out: str, cm_out: str, seed: in
             (
                 "model",
                 RandomForestClassifier(
-                    n_estimators=200,
+                    n_estimators=rf_estimators,
                     random_state=seed,
                     n_jobs=-1,
                     class_weight="balanced",
@@ -96,6 +107,7 @@ def run(input_glob: str, label_col: str, metrics_out: str, cm_out: str, seed: in
     rf_prob = rf.predict_proba(X_test)[:, 1]
 
     out = {
+        "run": metadata or {},
         "features": feature_cols,
         "random_forest": _metrics(y_test, rf_pred, rf_prob),
     }
@@ -143,7 +155,9 @@ def main() -> None:
     parser.add_argument("--metrics-out", default="results/baseline_metrics.json")
     parser.add_argument("--cm-out", default="results/baseline_confusion_matrix.png")
     parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
+    parser.add_argument("--test-size", type=float, default=0.2)
+    parser.add_argument("--rf-estimators", type=int, default=200)
+    args, _ = parse_args_with_config(parser, "baselines")
 
     run(
         input_glob=args.input_glob,
@@ -151,6 +165,9 @@ def main() -> None:
         metrics_out=args.metrics_out,
         cm_out=args.cm_out,
         seed=args.seed,
+        test_size=args.test_size,
+        rf_estimators=args.rf_estimators,
+        metadata=run_metadata(args),
     )
 
 

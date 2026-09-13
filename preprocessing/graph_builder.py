@@ -11,6 +11,7 @@ import pandas as pd
 import torch
 from torch_geometric.data import Data
 
+from common.config import parse_args_with_config
 from preprocessing.feature_extractor import add_basic_node_features, select_edge_feature_columns
 
 
@@ -22,13 +23,22 @@ def _find_col(df: pd.DataFrame, preferred: list[str]) -> str:
     raise ValueError(f"Could not find any of {preferred}")
 
 
+def parse_timestamps(values: pd.Series) -> pd.Series:
+    """Parse dataset timestamps.
+
+    Both datasets write day-first dates, and InSDN mixes formats within one file
+    ("12/1/2020 1:14" and "25/12/2019 05:20:05 PM"), so parse per element.
+    """
+    return pd.to_datetime(values, format="mixed", dayfirst=True, errors="coerce")
+
+
 def _to_timestamp_series(df: pd.DataFrame, ts_col: str) -> pd.Series:
     if ts_col not in df.columns:
         return pd.to_datetime(np.arange(len(df)), unit="s")
-    s = pd.to_datetime(df[ts_col], errors="coerce")
+    s = parse_timestamps(df[ts_col])
     if s.isna().all():
         return pd.to_datetime(np.arange(len(df)), unit="s")
-    return s.fillna(method="ffill").fillna(method="bfill")
+    return s.ffill().bfill()
 
 
 def build_graphs_from_dataframe(
@@ -40,6 +50,7 @@ def build_graphs_from_dataframe(
     window_seconds: int = 5,
     step_seconds: int = 1,
     max_graphs: int | None = None,
+    source_id: int = 0,
 ) -> list[Data]:
     if label_col not in df.columns:
         raise ValueError(f"Label column '{label_col}' missing")
@@ -47,7 +58,8 @@ def build_graphs_from_dataframe(
     timestamp = _to_timestamp_series(df, ts_col)
     df = df.copy()
     df["_ts"] = timestamp
-    df = df.sort_values("_ts").reset_index(drop=True)
+    # Stable sort keeps capture order among flows sharing a (minute-level) timestamp.
+    df = df.sort_values("_ts", kind="stable").reset_index(drop=True)
 
     edge_feature_cols = select_edge_feature_columns(df, exclude_columns=[label_col])
 
@@ -108,6 +120,9 @@ def build_graphs_from_dataframe(
 
         graph = Data(x=x, edge_index=edge_index, edge_attr=edge_attr_t, y=y)
         graph.num_nodes = x.shape[0]
+        # Used by the time-ordered train/val/test split.
+        graph.source_id = torch.tensor([source_id], dtype=torch.long)
+        graph.window_start = torch.tensor([(t - start).total_seconds()], dtype=torch.float64)
         graphs.append(graph)
 
         t = t + timedelta(seconds=step_seconds)
@@ -128,9 +143,9 @@ def run(
         raise FileNotFoundError(f"No cleaned files found by: {input_glob}")
 
     all_graphs: list[Data] = []
-    for file_path in files:
-        df = pd.read_csv(file_path)
-        
+    for source_id, file_path in enumerate(files):
+        df = pd.read_csv(file_path, low_memory=False)
+
         # Try to find IP columns first (for packet-level data like InSDN)
         src_col = None
         dst_col = None
@@ -160,6 +175,7 @@ def run(
             window_seconds=window_seconds,
             step_seconds=step_seconds,
             max_graphs=max_graphs_per_file,
+            source_id=source_id,
         )
         all_graphs.extend(graphs)
         print(f"{os.path.basename(file_path)} -> {len(graphs)} graph snapshots")
@@ -177,7 +193,7 @@ def main() -> None:
     parser.add_argument("--window-seconds", type=int, default=5)
     parser.add_argument("--step-seconds", type=int, default=1)
     parser.add_argument("--max-graphs-per-file", type=int, default=5000)
-    args = parser.parse_args()
+    args, _ = parse_args_with_config(parser, "graph_builder")
 
     run(
         input_glob=args.input_glob,

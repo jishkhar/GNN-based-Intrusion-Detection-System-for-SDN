@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GNN-IDS Live Monitor</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/live.css">
+</head>
+<body>
+<div class="ids-layout">
+
+  <aside class="ids-sidebar">
+    <div class="ids-logo">
+      <i class="bi bi-shield-shaded"></i>
+      <span>GNN<span class="ids-logo-accent">IDS</span></span>
+    </div>
+    <nav class="ids-nav">
+      <a href="#monitor" class="ids-nav-link active"><i class="bi bi-activity"></i> Live Monitor</a>
+      <a href="#alerts" class="ids-nav-link"><i class="bi bi-exclamation-triangle"></i> Alerts</a>
+      <a href="#rules" class="ids-nav-link"><i class="bi bi-shield-lock"></i> Mitigation</a>
+      <a href="/" class="ids-nav-link"><i class="bi bi-bar-chart-line"></i> Offline Evaluation</a>
+    </nav>
+    <div class="ids-sidebar-footer">SDN Intrusion Detection System</div>
+  </aside>
+
+  <main class="ids-main">
+    <header class="ids-topbar">
+      <div>
+        <h1 class="ids-page-title">Live Monitor</h1>
+        <span class="ids-page-subtitle">Real-time GNN detection on OpenFlow flow statistics</span>
+      </div>
+      <div class="ids-status-badge" id="connBadge">
+        <span class="ids-status-dot"></span> <span id="connText">Connecting…</span>
+      </div>
+    </header>
+
+    <div id="offlineNotice" class="ids-section" hidden>
+      <div class="ids-hint">
+        <i class="bi bi-plug"></i>
+        <span><strong>Live IDS not running.</strong> <span id="offlineReason"></span></span>
+      </div>
+    </div>
+
+    <section id="monitor" class="ids-section">
+      <div class="ids-section-label">Current window</div>
+      <div class="ids-kpi-grid">
+        <div class="ids-kpi" id="levelKpi">
+          <div class="ids-kpi-icon"><i class="bi bi-shield-check"></i></div>
+          <div><div class="ids-kpi-val" id="kpiLevel">—</div><div class="ids-kpi-label" id="kpiLevelSub">Status</div></div>
+        </div>
+        <div class="ids-kpi ids-kpi--blue">
+          <div class="ids-kpi-icon"><i class="bi bi-diagram-3"></i></div>
+          <div><div class="ids-kpi-val" id="kpiFlows">—</div><div class="ids-kpi-label">Active flows · <span id="kpiHosts">—</span> hosts</div></div>
+        </div>
+        <div class="ids-kpi ids-kpi--amber">
+          <div class="ids-kpi-icon"><i class="bi bi-shield-lock"></i></div>
+          <div><div class="ids-kpi-val" id="kpiRules">—</div><div class="ids-kpi-label">Active rules · <span id="kpiAlerts">—</span> alerts</div></div>
+        </div>
+        <div class="ids-kpi ids-kpi--green">
+          <div class="ids-kpi-icon"><i class="bi bi-stopwatch"></i></div>
+          <div><div class="ids-kpi-val" id="kpiLatency">—</div><div class="ids-kpi-label">Detection latency p90 (target 50 ms)</div></div>
+        </div>
+      </div>
+
+      <div class="ids-card-row">
+        <div class="ids-card live-topology-card">
+          <div class="ids-card-header"><i class="bi bi-share"></i> Traffic graph (current window)
+            <span class="live-legend">
+              <span class="dot dot-host"></span>host <span class="dot dot-victim"></span>victim <span class="dot dot-attacker"></span>attacker
+            </span>
+          </div>
+          <svg id="topology" class="live-topology"></svg>
+          <div class="live-caption" id="topologyCaption">Waiting for flow statistics…</div>
+        </div>
+        <div class="ids-card">
+          <div class="ids-card-header"><i class="bi bi-graph-up"></i> Attack confidence &amp; active flows</div>
+          <canvas id="timelineChart" class="ids-canvas"></canvas>
+          <dl class="ids-dl ids-dl--compact">
+            <dt>Predicted type</dt><dd id="predType">—</dd>
+            <dt>Window threshold</dt><dd id="thrAttack">—</dd>
+            <dt>Flagged hosts</dt><dd id="predAttackers">—</dd>
+            <dt>Uploads received</dt><dd id="uploads">—</dd>
+          </dl>
+        </div>
+      </div>
+    </section>
+
+    <section id="alerts" class="ids-section">
+      <div class="ids-section-label">Alerts</div>
+      <div class="ids-card">
+        <div class="live-scroll">
+          <table class="ids-table">
+            <thead><tr><th>Time</th><th>Level</th><th>Type</th><th>Confidence</th><th>Attackers</th><th>Victims</th><th>Rules</th></tr></thead>
+            <tbody id="alertRows"><tr class="ids-row--muted"><td colspan="7">No alerts yet</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="rules" class="ids-section">
+      <div class="ids-section-label">Mitigation</div>
+      <div class="ids-card-row">
+        <div class="ids-card">
+          <div class="ids-card-header"><i class="bi bi-shield-lock"></i> Active OpenFlow rules</div>
+          <div class="live-scroll">
+            <table class="ids-table">
+              <thead><tr><th>Rule</th><th>Action</th><th>Match</th><th>Type</th><th>Source</th><th>Expires</th><th></th></tr></thead>
+              <tbody id="ruleRows"><tr class="ids-row--muted"><td colspan="7">No active rules</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ids-card">
+          <div class="ids-card-header"><i class="bi bi-hand-index"></i> Manual action</div>
+          <form id="blockForm" class="live-form">
+            <input id="blockIp" class="form-control form-control-sm" placeholder="IP address, e.g. 10.0.0.1" required>
+            <select id="blockAction" class="form-select form-select-sm">
+              <option value="drop">Drop traffic from IP</option>
+              <option value="rate_limit">Rate-limit traffic from IP</option>
+            </select>
+            <input id="apiKey" class="form-control form-control-sm" type="password" placeholder="API key (if IDS_API_KEY is set)">
+            <button class="btn btn-sm btn-primary" type="submit"><i class="bi bi-slash-circle"></i> Block</button>
+            <div id="formMsg" class="live-caption"></div>
+          </form>
+        </div>
+      </div>
+      <div class="ids-card">
+        <div class="ids-card-header"><i class="bi bi-journal-text"></i> Audit log (logs/mitigation_log.jsonl)</div>
+        <div class="live-scroll">
+          <table class="ids-table">
+            <thead><tr><th>Time</th><th>Event</th><th>Rule</th><th>Match</th><th>Reason</th></tr></thead>
+            <tbody id="logRows"><tr class="ids-row--muted"><td colspan="5">Empty</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+<script src="/static/js/live.js"></script>
+</body>
+</html>

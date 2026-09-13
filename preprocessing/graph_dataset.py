@@ -53,7 +53,75 @@ def load_graphs(path: str):
     return graphs
 
 
-def split_graphs(graphs, test_size: float = 0.15, val_size: float = 0.15, seed: int = 42):
+def _graph_group(graph) -> tuple:
+    source = getattr(graph, "source_id", None)
+    source = int(source.item()) if torch.is_tensor(source) else (source if source is not None else 0)
+    return source, int(graph.y.view(-1)[0].item())
+
+
+def _graph_time(graph, fallback: int) -> float:
+    start = getattr(graph, "window_start", None)
+    if start is None:
+        return float(fallback)
+    return float(start.item()) if torch.is_tensor(start) else float(start)
+
+
+def time_split_indices(
+    groups: list,
+    times: list[float],
+    test_size: float = 0.15,
+    val_size: float = 0.15,
+    gap: int = 0,
+) -> tuple[list[int], list[int], list[int]]:
+    """Chronological split within each group.
+
+    Each group (e.g. one capture file and class) is sorted by time; its earliest
+    windows go to train, then val, then test. ``gap`` windows are dropped at each
+    boundary so overlapping sliding windows never appear on both sides.
+    """
+    by_group: dict = {}
+    for idx, (group, t) in enumerate(zip(groups, times)):
+        by_group.setdefault(group, []).append((t, idx))
+
+    train, val, test = [], [], []
+    for members in by_group.values():
+        order = [idx for _, idx in sorted(members)]
+        n = len(order)
+        if n < 3:
+            # Too small to split in time; keep it in training rather than dropping it.
+            train.extend(order)
+            continue
+        n_test = max(1, int(round(n * test_size)))
+        n_val = max(1, int(round(n * val_size)))
+        n_train = n - n_val - n_test
+        g = gap if n_train - 2 * gap >= 1 else 0
+        train.extend(order[: n_train - g])
+        val.extend(order[n_train : n_train + n_val - g])
+        test.extend(order[n_train + n_val :])
+    return sorted(train), sorted(val), sorted(test)
+
+
+def split_graphs(
+    graphs,
+    test_size: float = 0.15,
+    val_size: float = 0.15,
+    seed: int = 42,
+    mode: str = "time",
+    gap: int = 0,
+):
+    """Split graphs into train/val/test.
+
+    ``mode="time"`` (default) is leakage-safe for sliding windows;
+    ``mode="random"`` reproduces the Phase 1 stratified random split.
+    """
+    if mode == "time":
+        groups = [_graph_group(g) for g in graphs]
+        times = [_graph_time(g, i) for i, g in enumerate(graphs)]
+        tr, va, te = time_split_indices(groups, times, test_size, val_size, gap)
+        return [graphs[i] for i in tr], [graphs[i] for i in va], [graphs[i] for i in te]
+    if mode != "random":
+        raise ValueError(f"Unknown split mode: {mode}")
+
     labels = [int(g.y.item()) for g in graphs]
     train_graphs, test_graphs = train_test_split(
         graphs, test_size=test_size, random_state=seed, stratify=labels
@@ -122,6 +190,8 @@ def create_loaders(
     seed: int = 42,
     normalize: bool = True,
     feature_stats: GraphFeatureStats | None = None,
+    split_mode: str = "time",
+    split_gap: int = 0,
 ) -> GraphSplits:
     graphs = load_graphs(graph_path)
     train_graphs, val_graphs, test_graphs = split_graphs(
@@ -129,6 +199,8 @@ def create_loaders(
         test_size=test_size,
         val_size=val_size,
         seed=seed,
+        mode=split_mode,
+        gap=split_gap,
     )
     if normalize:
         feature_stats = feature_stats or fit_feature_stats(train_graphs)

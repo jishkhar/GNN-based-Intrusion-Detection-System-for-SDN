@@ -21,3 +21,4 @@ DEBUG = True
 GNN_METRICS_FILE = RESULTS_DIR / "gnn_metrics.json"
 BASELINE_METRICS_FILE = RESULTS_DIR / "baseline_metrics.json"
 GNN_CLASSIFICATION_REPORT_FILE = RESULTS_DIR / "gnn_classification_report.json"
+PHASE2_RESULTS_DIR = RESULTS_DIR / "phase2"

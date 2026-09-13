@@ -1,0 +1,23 @@
+name: tests
+
+on:
+  push:
+    branches: [main, phase2]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies (CPU-only PyTorch)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install torch-geometric pandas numpy scikit-learn xgboost networkx matplotlib pyyaml \
+            fastapi uvicorn httpx requests pytest
+      - name: Run tests
+        # The suite uses synthetic data and a tiny generated model; no datasets or GPU needed.
+        run: python -m pytest tests -q

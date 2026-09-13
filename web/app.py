@@ -1,106 +1,156 @@
-from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
+"""GNN-IDS API and dashboard.
+
+Offline results (Phase 1 + Phase 2 metrics) are always available. The live IDS
+(``inference.service.IDSService``) starts when the exported model exists; the
+SDN controller then posts flow statistics to ``POST /api/flows`` and receives
+mitigation actions in the response.
+
+Environment variables:
+    IDS_CONFIG        config file with an ``ids_service`` section (default configs/phase2.yaml)
+    IDS_API_KEY       if set, write endpoints require header ``X-API-Key``
+    IDS_CORS_ORIGINS  comma-separated allowed origins (default: localhost:3000)
+    IDS_LOG_DIR       override ids_service.log_dir
+    IDS_RECORD_FLOWS  record every flow-stats entry to this CSV (labelled Mininet data)
+    IDS_MITIGATION    0 = detect and alert only, never install rules
+"""
+import asyncio
 import json
+import os
+import sys
 from pathlib import Path
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
 from config import (
-    STATIC_DIR,
-    GNN_METRICS_FILE,
-    BASELINE_METRICS_FILE,
-    GNN_CLASSIFICATION_REPORT_FILE,
+    API_DESCRIPTION,
     API_TITLE,
     API_VERSION,
-    API_DESCRIPTION,
+    BASELINE_METRICS_FILE,
+    GNN_CLASSIFICATION_REPORT_FILE,
+    GNN_METRICS_FILE,
+    PHASE2_RESULTS_DIR,
+    PROJECT_ROOT,
+    STATIC_DIR,
 )
 
-# Initialize FastAPI app
-app = FastAPI(
-    title=API_TITLE,
-    version=API_VERSION,
-    description=API_DESCRIPTION,
-)
+# The IDS service lives in project packages (inference/, controller/, ...).
+sys.path.insert(0, str(PROJECT_ROOT))
 
-# Add CORS middleware
+app = FastAPI(title=API_TITLE, version=API_VERSION, description=API_DESCRIPTION)
+
+_origins = os.environ.get("IDS_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[o.strip() for o in _origins.split(",") if o.strip()],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
-
-# Mount static files
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+service = None  # IDSService, created on startup when the model exists
+service_error: str | None = None
 
-# Root endpoint - serve index.html
+
+def _load_service():
+    global service, service_error
+    from common.config import load_config
+    from inference.service import IDSService, ServiceConfig
+
+    config_path = os.environ.get("IDS_CONFIG", str(PROJECT_ROOT / "configs" / "phase2.yaml"))
+    cfg = ServiceConfig.from_dict(load_config(config_path).get("ids_service"))
+    # Per-session overrides, e.g. when collecting labelled Mininet data.
+    cfg.log_dir = os.environ.get("IDS_LOG_DIR", cfg.log_dir)
+    cfg.record_flows_path = os.environ.get("IDS_RECORD_FLOWS", cfg.record_flows_path)
+    if os.environ.get("IDS_MITIGATION") == "0":  # detect only, e.g. while collecting training data
+        cfg.mitigation_enabled = False
+    for attr in ("model_path", "log_dir", "record_flows_path"):
+        value = getattr(cfg, attr)
+        if value and not os.path.isabs(value):
+            setattr(cfg, attr, str(PROJECT_ROOT / value))
+    if not os.path.exists(cfg.model_path):
+        service_error = f"Model not found: {cfg.model_path} (run scripts/run_phase2_training.sh)"
+        return
+    try:
+        service = IDSService(cfg)
+    except Exception as exc:  # keep the offline dashboard usable
+        service_error = f"{type(exc).__name__}: {exc}"
+
+
+@app.on_event("startup")
+def startup() -> None:
+    if os.environ.get("IDS_DISABLE_LIVE") != "1":
+        _load_service()
+
+
+def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+    expected = os.environ.get("IDS_API_KEY")
+    if expected and x_api_key != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+
+
+def require_service():
+    if service is None:
+        raise HTTPException(status_code=503, detail=service_error or "Live IDS not started")
+    return service
+
+
+def _read_json(path: Path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"error": f"File not found: {path}"}
+    except json.JSONDecodeError:
+        return {"error": f"Invalid JSON in {path}"}
+
+
+# ------------------------------------------------------------------ pages
 @app.get("/")
 async def root():
     return FileResponse(str(STATIC_DIR / "index.html"))
 
 
-# API Endpoints
+@app.get("/live")
+async def live_page():
+    return FileResponse(str(STATIC_DIR / "live.html"))
+
+
+# ------------------------------------------------------- offline results
 @app.get("/api/metrics/gnn")
 async def get_gnn_metrics():
-    """Get GNN model metrics including training history and test results."""
-    try:
-        with open(GNN_METRICS_FILE, "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {"error": f"File not found: {GNN_METRICS_FILE}"}
-    except json.JSONDecodeError:
-        return {"error": "Invalid JSON in GNN metrics file"}
+    """Phase 1 GNN metrics including training history and test results."""
+    return _read_json(GNN_METRICS_FILE)
 
 
 @app.get("/api/metrics/baseline")
 async def get_baseline_metrics():
-    """Get baseline model metrics (Random Forest, XGBoost)."""
-    try:
-        with open(BASELINE_METRICS_FILE, "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {"error": f"File not found: {BASELINE_METRICS_FILE}"}
-    except json.JSONDecodeError:
-        return {"error": "Invalid JSON in baseline metrics file"}
+    """Phase 1 baseline metrics (Random Forest, XGBoost)."""
+    return _read_json(BASELINE_METRICS_FILE)
 
 
 @app.get("/api/classification-report")
 async def get_classification_report():
-    """Get detailed classification report (per-class metrics)."""
-    try:
-        with open(GNN_CLASSIFICATION_REPORT_FILE, "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {"error": f"File not found: {GNN_CLASSIFICATION_REPORT_FILE}"}
-    except json.JSONDecodeError:
-        return {"error": "Invalid JSON in classification report file"}
+    return _read_json(GNN_CLASSIFICATION_REPORT_FILE)
 
 
-@app.get("/api/health")
-async def health_check():
-    """Health check endpoint."""
-    return {
-        "status": "healthy",
-        "gnn_metrics": GNN_METRICS_FILE.exists(),
-        "baseline_metrics": BASELINE_METRICS_FILE.exists(),
-        "classification_report": GNN_CLASSIFICATION_REPORT_FILE.exists(),
-    }
+@app.get("/api/metrics/phase2")
+async def get_phase2_metrics():
+    """Phase 2 GNN, baselines and ablations (whatever has been produced)."""
+    out = {}
+    for path in sorted(PHASE2_RESULTS_DIR.glob("*.json")):
+        out[path.stem] = _read_json(path)
+    return out
 
 
 @app.get("/api/summary")
 async def get_summary():
-    """Get a summary of all metrics for quick overview."""
     try:
-        with open(GNN_METRICS_FILE, "r") as f:
-            gnn = json.load(f)
-
-        with open(BASELINE_METRICS_FILE, "r") as f:
-            baseline = json.load(f)
-
-        with open(GNN_CLASSIFICATION_REPORT_FILE, "r") as f:
-            classification = json.load(f)
-
+        gnn = _read_json(GNN_METRICS_FILE)
+        baseline = _read_json(BASELINE_METRICS_FILE)
         return {
             "gnn": {
                 "accuracy": gnn["test"]["accuracy"],
@@ -111,17 +161,114 @@ async def get_summary():
                 "best_val_f1": gnn["best_val_f1"],
                 "decision_threshold": gnn["decision_threshold"],
             },
-            "baseline": {
-                "random_forest": baseline["random_forest"],
-                "xgboost": baseline["xgboost"],
-            },
-            "classification": classification,
+            "baseline": {"random_forest": baseline["random_forest"], "xgboost": baseline["xgboost"]},
+            "classification": _read_json(GNN_CLASSIFICATION_REPORT_FILE),
         }
     except Exception as e:
         return {"error": str(e)}
 
 
+@app.get("/api/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "gnn_metrics": GNN_METRICS_FILE.exists(),
+        "baseline_metrics": BASELINE_METRICS_FILE.exists(),
+        "classification_report": GNN_CLASSIFICATION_REPORT_FILE.exists(),
+        "live_ids": service is not None,
+        "live_ids_error": service_error,
+    }
+
+
+# ------------------------------------------------------------- live IDS
+class FlowUpload(BaseModel):
+    flows: list[dict] = Field(default_factory=list, description="OpenFlow flow-stats entries")
+    removed_cookies: list[int] = Field(default_factory=list, description="IDS rule cookies removed by switches")
+    controller: str | None = None
+
+
+class BlockRequest(BaseModel):
+    ip: str
+    direction: str = Field(default="src", pattern="^(src|dst)$")
+    action: str = Field(default="drop", pattern="^(drop|rate_limit)$")
+    reason: str = "manual block from dashboard"
+
+
+class UnblockRequest(BaseModel):
+    rule_id: str
+    reason: str = "manual unblock from dashboard"
+
+
+@app.post("/api/flows", dependencies=[Depends(require_api_key)])
+def post_flows(upload: FlowUpload):
+    """Controller uploads one polling cycle; the response carries mitigation actions."""
+    return require_service().process_flows(upload.flows, upload.removed_cookies)
+
+
+@app.get("/api/alerts")
+def get_alerts(limit: int = 100):
+    return list(require_service().alerts)[-limit:][::-1]
+
+
+@app.get("/api/mitigations")
+def get_mitigations():
+    return require_service().mitigation.active_rules()
+
+
+@app.get("/api/mitigations/log")
+def get_mitigation_log(limit: int = 100):
+    return require_service().mitigation.read_log(limit)[::-1]
+
+
+@app.post("/api/mitigations/block", dependencies=[Depends(require_api_key)])
+def block(req: BlockRequest):
+    match = {"ipv4_src" if req.direction == "src" else "ipv4_dst": req.ip}
+    return require_service().mitigation.block(match, req.action, req.reason)
+
+
+@app.post("/api/mitigations/unblock", dependencies=[Depends(require_api_key)])
+def unblock(req: UnblockRequest):
+    svc = require_service()
+    cmd = svc.mitigation.unblock(req.rule_id, req.reason)
+    if cmd is None:
+        raise HTTPException(status_code=404, detail=f"No active rule {req.rule_id}")
+    ip = next(iter(cmd["match"].values()))
+    svc.classifier.reset_cooldown(ip)
+    return cmd
+
+
+@app.get("/api/topology")
+def get_topology():
+    return require_service().last_topology
+
+
+@app.get("/api/live/status")
+def live_status():
+    return require_service().status()
+
+
+@app.get("/api/live/latency")
+def live_latency():
+    return require_service().latency_summary()
+
+
+@app.get("/api/live/stream")
+async def live_stream(request: Request, last_id: int = 0):
+    """Server-Sent Events: alerts, mitigation actions and per-window summaries."""
+    svc = require_service()
+
+    async def events():
+        cursor = last_id
+        while not await request.is_disconnected():
+            for event_id, event in svc.events_since(cursor):
+                cursor = event_id
+                yield f"id: {event_id}\ndata: {json.dumps(event, default=str)}\n\n"
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=3000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=3000)
