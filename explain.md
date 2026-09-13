@@ -492,3 +492,139 @@ The baseline models are slightly stronger in raw metric comparison, which should
 The best way to present the result is:
 
 > The current phase validates the feasibility of using graph neural networks for SDN intrusion detection. The model achieves very high detection performance on offline datasets, and the next step is to extend it into live SDN traffic monitoring and mitigation.
+
+---
+
+# Phase 2 — Explanation for the Guide
+
+Full numbers: `results/phase2/final_results.md`. Design reasoning: `Docs/design_decisions.md`.
+
+## P1. One-paragraph summary
+
+> In Phase 2 the IDS became a working SDN security system. Traffic windows are turned into real
+> host-to-host graphs using only features an OpenFlow switch can report, so the same model runs on
+> datasets and on live switches. A multi-task Graph Attention Network predicts the attack type of each
+> window and an attacker score for every host. The live system runs on an os-ken SDN controller with
+> Mininet: the controller streams flow statistics to the IDS every 2 seconds, the IDS detects the attack,
+> identifies the attacking hosts and sends back OpenFlow rules that drop or rate-limit them.
+
+## P2. What changed from Phase 1 and why (say this first)
+
+| Phase 1 issue | What we found | Phase 2 fix |
+|---|---|---|
+| Graphs had no real topology | The CICIDS2017 files used have no IP columns; nodes were made up from row numbers and ports | Real host graphs from InSDN (IPs, ports, timestamps) |
+| InSDN labels were wrong | Only `BENIGN` was treated as benign; InSDN uses `Normal`, so 100 % of InSDN was "attack" | Shared label map; unknown labels are never benign |
+| Scores were inflated | Random split of overlapping windows leaks near-duplicates into the test set | Time-ordered split with a gap (Phase 1 F1: 0.994 → 0.983 when fixed) |
+| Features couldn't run live | 78 CICFlowMeter features; a switch reports ~6 counters | OpenFlow-only features, one shared module |
+| No "who to block" | Only a window label | Per-host attacker head |
+| Victims labelled as attackers | InSDN has victim→attacker rows with attack labels (27 % of one capture) | Direction normalisation (lower port = server) |
+
+This is a strong point to make: we found and fixed problems in our own Phase 1 results before building on them.
+
+## P3. Offline results (InSDN test split, same features and split for all models)
+
+| | Random Forest | XGBoost | GAT-IDS |
+|---|---:|---:|---:|
+| Attack detected in window (F1) | 0.998 | 0.998 | 0.999 |
+| Attack type, macro-F1 (classes with ≥ 20 test windows) | 0.970 | 0.970 | **0.993** |
+| DDoS / DoS / Probe F1 | 0.972 / 0.961 / 0.951 | 0.973 / 0.961 / 0.950 | **0.997 / 0.979 / 0.996** |
+| Attacker host F1 (per-host features) | 0.994 | 0.995 | **0.997** |
+| Attacker host F1 (max of flow scores) | 0.996 | **0.999** | — |
+
+How to explain it:
+- *Detecting* an attack is easy on InSDN: every model is at 0.998–0.999. The difference is in
+  *naming* the attack: the GNN makes about 75 % fewer attack-type errors on the main classes. Those are
+  the coordinated/structural attacks (DDoS star, scan fan-out), where the graph helps.
+- For identifying attacker hosts the models are roughly equal; XGBoost on flow scores is slightly
+  better. Say so. The GNN's advantage is one model doing both tasks, and it runs within 10 ms.
+- The GNN is **worse on rare classes** (BruteForce 0.48, WebAttack/Botnet 0.0 on 1–9 test windows):
+  a flow model gets every one of ~1,400 flows as a training sample, the GNN only ~50 windows. The
+  binary detector still flags these windows as attacks.
+- The original "+15–25 % F1" target is not meaningful when baselines already score 0.97; the honest
+  framing is error reduction on coordinated attacks.
+
+Ablations: GAT gives the best attack-type score (0.993) vs. GCN 0.984, GraphSAGE 0.911 and GAT without
+edge features 0.981, so attention and edge features both help. GraphSAGE has the best host F1 (0.998).
+
+## P4. From dataset to live network
+
+1. **Replay test** (held-out InSDN flows through the live code path): every attack detected in all
+   windows, all real attacker IPs blocked, DDoS handled by rate-limiting the victim (its sources are
+   spoofed), 0 false alerts in 55 benign windows, 0 benign hosts blocked, latency p99 ≈ 12 ms.
+2. **First Mininet test** (InSDN-only model): the attack was dropped 100 % within ~6 s, **but benign
+   hosts, including the web server, were blocked**. On lab traffic the InSDN-only model flagged 98.7 % of
+   benign windows. Benign traffic in our lab looks nothing like InSDN's benign capture.
+3. **Fine-tuning** on 29 labelled Mininet runs (mitigation off while recording, split by run): benign
+   false-positive rate on held-out lab runs 98.7 % → **1.7 %**, attack-type macro-F1 0.16 → **0.994**,
+   while InSDN performance stayed the same (0.991 macro-F1, 0 % FPR). This is the domain-gap lesson:
+   a model is only as good as its match to the network it protects.
+
+4. **Live mitigation, three iterations** (3 repeats × benign/DDoS/DoS/Probe/BruteForce, mitigation on):
+
+| Version | Attack runs ≥ 70 % dropped | Mean drop | Runs blocking a benign host | Rules in benign runs |
+|---|---:|---:|---:|---:|
+| Fine-tuned model, first version | 5/12 | 50 % | 9/12 | 1/3 |
+| + mean host score, 2-window persistence, packet/s meters | 6/12 | 66 % | 1/12 | 0/3 |
+| **+ rule priorities, per-switch rule tracking (final)** | **12/12** | **95 %** | **0/12** | **0/3** |
+
+Final per attack: DoS 100 %, BruteForce 100 %, Probe 99 %, DDoS 80 % (victim rate-limited to 200 pps
+by design). Median time to mitigation 4.5 s (Probe 17 s).
+
+Be upfront about two things visible in `results/phase2/mitigation_timeline.png`:
+- **Probe**: the first full scan (a ~3 s burst) is over before the rule lands; the rate limit stops the
+  repeated scans that follow, not the first one.
+- **DDoS**: benign clients keep only ~3 % of their traffic to the victim during the flood (DoS, Probe
+  and BruteForce: 96–100 %+). Rate-limiting the victim protects the server from overload, but spoofed
+  packets use up most of the allowance. Serving legitimate clients during a spoofed flood needs SYN
+  cookies or a SYN proxy — a known limit of IP-based mitigation.
+
+What each fix was for:
+- *Benign clients blocked*: a host was scored by its *worst* chunk; with ~20 chunks per window and a
+  window every 2 s, rare mistakes became certain. Now: mean over chunks + flagged in 2 windows in a row.
+- *Rate limits did nothing*: they were in kbit/s, and a SYN flood is 54-byte packets; now packets/s.
+- *A DoS kept flowing despite a correct drop rule*: a leftover DDoS victim rate-limit had the same
+  OpenFlow priority and won the tie. Now drop > rate-limit > victim protection.
+
+## P5. Things we discovered during integration (good discussion points)
+
+- **The controller is a DoS target.** With 5-tuple forwarding rules, a SYN flood with random source
+  ports creates a new flow entry per packet: flow tables reached 60,000 entries, stats polls slowed from
+  2 s to 5 s and a later port scan was starved. This is the known SDN controller-saturation problem; a
+  coarser match mode (`--match-mode host_pair`) and early mitigation reduce it.
+- **Spoofed DDoS can't be blocked by source IP.** 400+ one-flow sources in a window: the engine
+  rate-limits traffic to the victim instead, but still blocks any source with many flows (a real DoS
+  host hiding in the flood).
+- **Fail-open.** If the IDS is down, the network keeps forwarding.
+- **Latency.** p90 ≈ 10 ms per window; 37 ms even for a 5,000-flow window on the laptop GPU.
+  The first three calls took ~200 ms (TorchScript warm-up), now paid at start-up.
+
+## P6. Limitations to state
+
+- One real SDN dataset (InSDN) plus our own lab; the CICIDS2017 files with IP columns were not
+  available for a cross-dataset test.
+- Lab attacks are tool-generated (hping3, nmap, curl loops) on a 6-host topology.
+- Rare attack types have too little window-level data.
+- Detection time is dominated by the 2 s polling interval and the 10 s window, not by the model.
+- Mitigation by IP cannot stop spoofed floods at the source.
+
+## P7. Likely questions
+
+**Q. Why not just use XGBoost?** It is as good at *detecting* and at scoring hosts from flows. The GNN
+is clearly better at naming coordinated attacks and gives window type and host scores in one model.
+Both could run side by side; our comparison is honest about this.
+
+**Q. How do you know which host to block?** The node head scores every host; only hosts above a
+validation-tuned threshold, not whitelisted and not in cool-down, are blocked, with rules that expire.
+
+**Q. What if it blocks the wrong host?** Rules expire (60 s idle / 300 s max), there's a dashboard
+unblock button, infrastructure can be whitelisted, and every action is in the audit log. This is
+exactly what happened in our first live test, which is why we fine-tuned and measure false blocks.
+
+**Q. Is 1.7 % false positives acceptable?** It is per 200-flow chunk of lab traffic; the architecture
+target was < 5 %. What matters operationally is blocking: in the final live evaluation no benign host
+was blocked in any run, and no rule was installed during benign-only traffic.
+
+**Q. Why does mitigation take seconds, not the "2 round-trips" in the architecture?** The switch only
+reports statistics every 2 s, the model looks at a 10 s window, and we deliberately wait for 2 attack
+windows before blocking (that removed all false blocks). The model itself answers in ~10 ms. Faster
+detection would need faster polling or packet sampling, which costs controller load.

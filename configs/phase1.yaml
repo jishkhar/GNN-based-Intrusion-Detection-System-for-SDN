@@ -1,37 +1,51 @@
+# Phase 1 (legacy, CICIDS2017 MachineLearningCVE) pipeline configuration.
+# Each top-level section is read by one script via `--config configs/phase1.yaml`;
+# keys match the script's command-line flags (dashes -> underscores).
+# Command-line flags override values here.
 project_name: gnn_ids_phase1
 seed: 42
 
-data:
-  cicids_clean_glob: data/cicids2017/cleaned/*.csv
-  insdn_clean_glob: data/insdn/cleaned/*.csv
-  graph_output: data/graphs/cicids_graphs.pt
+clean:
   label_column: Label
-  src_ip_column: Source IP
-  dst_ip_column: Destination IP
-  timestamp_column: Timestamp
 
-graph:
+baselines:
+  input_glob: data/cicids2017/cleaned/*.csv
+  label_col: Label
+  metrics_out: results/baseline_metrics.json
+  cm_out: results/baseline_confusion_matrix.png
+  seed: 42
+  test_size: 0.2
+  rf_estimators: 200
+
+graph_builder:
+  input_glob: data/cicids2017/cleaned/*.csv
+  output_path: data/graphs/cicids_graphs.pt
+  label_col: Label
   window_seconds: 5
   step_seconds: 1
+  max_graphs_per_file: 5000
 
-baseline:
-  test_size: 0.15
-  val_size: 0.15
-  random_forest_estimators: 200
-
-gnn:
+train_gnn:
+  graph_path: data/graphs/cicids_graphs.pt
+  checkpoint_path: models/checkpoints/best_gat.pt
+  metrics_path: results/gnn_metrics.json
+  curves_path: results/training_curves.png
+  epochs: 40
+  seed: 42
+  batch_size: 128
   hidden_dim: 64
   heads: 4
-  dropout: 0.3
-  lr: 0.001
+  dropout: 0.25
+  lr: 0.0007
   weight_decay: 0.0001
-  epochs: 40
-  batch_size: 16
-  patience: 8
+  patience: 10
+  test_size: 0.15
+  val_size: 0.15
+  split_mode: time
+  split_gap: 5
 
-outputs:
-  baseline_metrics: results/baseline_metrics.json
-  baseline_cm_png: results/baseline_confusion_matrix.png
-  gnn_metrics: results/gnn_metrics.json
-  gnn_cm_png: results/gnn_confusion_matrix.png
-  best_checkpoint: models/checkpoints/best_gat.pt
+evaluate:
+  graph_path: data/graphs/cicids_graphs.pt
+  checkpoint_path: models/checkpoints/best_gat.pt
+  report_out: results/gnn_classification_report.json
+  cm_out: results/gnn_confusion_matrix.png

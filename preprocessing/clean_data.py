@@ -9,6 +9,12 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from common.config import parse_args_with_config
+from preprocessing.labels import binary_label, canonical_class
+
+# Canonical multi-class label written next to the binary `Label` column.
+ATTACK_COLUMN = "Attack"
+
 
 @dataclass
 class CleaningStats:
@@ -17,11 +23,11 @@ class CleaningStats:
     rows_after: int
     duplicates_removed: int
     missing_after: int
+    class_counts: dict | None = None
 
 
 def normalize_label(value: object) -> int:
-    text = str(value).strip().lower()
-    return 0 if text == "benign" else 1
+    return binary_label(value)
 
 
 def clean_dataframe(df: pd.DataFrame, label_column: str) -> tuple[pd.DataFrame, CleaningStats]:
@@ -49,7 +55,8 @@ def clean_dataframe(df: pd.DataFrame, label_column: str) -> tuple[pd.DataFrame, 
         if df[col].isna().any():
             df[col] = df[col].fillna("unknown")
 
-    df[label_column] = df[label_column].apply(normalize_label).astype(int)
+    df[ATTACK_COLUMN] = df[label_column].map(canonical_class)
+    df[label_column] = df[label_column].map(normalize_label).astype(int)
     missing_after = int(df.isna().sum().sum())
 
     stats = CleaningStats(
@@ -58,6 +65,7 @@ def clean_dataframe(df: pd.DataFrame, label_column: str) -> tuple[pd.DataFrame, 
         rows_after=len(df),
         duplicates_removed=duplicates_removed,
         missing_after=missing_after,
+        class_counts={k: int(v) for k, v in df[ATTACK_COLUMN].value_counts().items()},
     )
     return df, stats
 
@@ -70,7 +78,8 @@ def run(input_glob: str, output_dir: str, label_column: str) -> None:
 
     all_stats: list[dict] = []
     for file_path in files:
-        df = pd.read_csv(file_path)
+        # latin-1 never fails to decode; some CICIDS2017 label strings are not valid UTF-8.
+        df = pd.read_csv(file_path, encoding="latin-1", low_memory=False)
         cleaned, stats = clean_dataframe(df, label_column=label_column)
         stats.file_name = os.path.basename(file_path)
 
@@ -92,7 +101,7 @@ def main() -> None:
     parser.add_argument("--input-glob", required=True, help="Input CSV glob, e.g. data/cicids2017/raw/*.csv")
     parser.add_argument("--output-dir", required=True, help="Directory for cleaned CSVs")
     parser.add_argument("--label-column", default="Label", help="Label column name")
-    args = parser.parse_args()
+    args, _ = parse_args_with_config(parser, "clean")
     run(args.input_glob, args.output_dir, args.label_column)
 
 

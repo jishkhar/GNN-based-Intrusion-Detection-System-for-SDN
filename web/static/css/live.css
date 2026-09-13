@@ -1,0 +1,25 @@
+/* Live monitor additions on top of style.css */
+.live-topology-card { flex: 1.4; }
+.live-topology { width: 100%; height: 340px; display: block; }
+.live-topology line { stroke: rgba(255,255,255,0.18); }
+.live-topology text { fill: var(--muted); font-size: 10px; pointer-events: none; }
+.live-caption { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.live-legend { margin-left: auto; font-size: 11px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.dot-host { background: var(--blue); }
+.dot-victim { background: var(--amber); }
+.dot-attacker { background: var(--red); }
+.live-scroll { max-height: 320px; overflow: auto; }
+.live-form { display: grid; gap: 8px; }
+.live-form .form-control, .live-form .form-select {
+  background: var(--surface2); color: var(--text); border-color: var(--border2);
+}
+.ids-kpi--level-benign .ids-kpi-icon { background: var(--green-bg); color: var(--green); }
+.ids-kpi--level-suspicious .ids-kpi-icon { background: var(--amber-bg); color: var(--amber); }
+.ids-kpi--level-attack .ids-kpi-icon { background: var(--red-bg); color: var(--red); }
+.ids-kpi--level-attack { border-color: var(--red); }
+.ids-badge--amber { background: var(--amber-bg); color: var(--amber); }
+.ids-status-badge.is-offline { color: var(--muted); background: var(--surface2); }
+.ids-status-badge.is-offline .ids-status-dot { background: var(--muted); box-shadow: none; }
+tr.live-new td { animation: flash 1.5s ease-out; }
+@keyframes flash { from { background: var(--red-bg); } to { background: transparent; } }

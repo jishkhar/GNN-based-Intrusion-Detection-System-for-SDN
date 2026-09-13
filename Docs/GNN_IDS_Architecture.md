@@ -325,7 +325,7 @@ Attack Alert Received
 | **Model Training** | PyTorch, scikit-learn (baseline comparison) |
 | **Baseline Models** | XGBoost, Random Forest, SVM |
 | **Graph Library** | NetworkX (graph construction), PyG (GNN ops) |
-| **API / Integration** | Flask REST API (IDS ↔ Controller bridge) |
+| **API / Integration** | FastAPI REST API (IDS ↔ Controller bridge) |
 | **Experiment Tracking** | MLflow / Weights & Biases (optional) |
 | **Visualization** | Matplotlib, Seaborn (metrics), Gephi (graph viz) |
 | **Language** | Python 3.10+ |
@@ -396,7 +396,7 @@ Total:                   ~50ms  ✓
 │  └─────────────────────────┬───────────────────┘  │
 │                            │ REST API             │
 │  ┌─────────────────────────▼───────────────────┐  │
-│  │    GNN-IDS Engine (Flask + PyTorch)         │  │
+│  │    GNN-IDS Engine (FastAPI + PyTorch)       │  │
 │  └─────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────┘
 ```
@@ -421,7 +421,7 @@ gnn-ids/
 ├── mitigation/
 │   └── mitigation_engine.py    # OpenFlow rule generator
 ├── api/
-│   └── app.py                  # Flask REST API (IDS ↔ Controller)
+│   └── app.py                  # FastAPI REST API (IDS ↔ Controller)
 ├── data/
 │   ├── cicids2017/             # Dataset (raw + preprocessed)
 │   └── insdn/

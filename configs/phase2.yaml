@@ -1,0 +1,78 @@
+# Phase 2 pipeline configuration (topology graphs, multi-task GNN, live IDS).
+# Each top-level section is read by one script via `--config configs/phase2.yaml`;
+# keys match the script's command-line flags (dashes -> underscores).
+project_name: gnn_ids_phase2
+seed: 42
+
+graph_builder_v2:
+  input_glob: data/insdn/cleaned/*_cleaned.csv
+  output_path: data/graphs/insdn_v2.pt
+  # InSDN timestamps are mostly minute-level, so windows are N consecutive
+  # flows in capture order rather than W seconds.
+  window_mode: count
+  window_size: 100
+  window_stride: 25
+  # Benign traffic lives in one file; a smaller stride balances classes.
+  stride_overrides:
+    Normal_data_cleaned.csv: 10
+  min_attack_frac: 0.1
+  overlay_prob: 0.5
+  test_size: 0.15
+  val_size: 0.15
+  seed: 42
+
+baselines_v2:
+  graph_path: data/graphs/insdn_v2.pt
+  metrics_out: results/phase2/baselines_v2.json
+  scores_out: results/phase2/baseline_scores.npz
+  seed: 42
+  rf_estimators: 200
+  xgb_estimators: 300
+
+train_gnn_v2:
+  graph_path: data/graphs/insdn_v2.pt
+  checkpoint_path: models/checkpoints/gnn_v2_gat.pt
+  metrics_path: results/phase2/gnn_v2_gat.json
+  scores_out: results/phase2/gnn_v2_gat_scores.npz
+  curves_path: results/phase2/gnn_v2_gat_curves.png
+  conv_type: gat
+  use_edge_features: true
+  hidden_dim: 64
+  heads: 4
+  num_layers: 2
+  dropout: 0.2
+  alpha: 0.5
+  lr: 0.001
+  weight_decay: 0.0001
+  batch_size: 64
+  epochs: 60
+  patience: 10
+  seed: 42
+
+export:
+  # InSDN-only model. The live IDS uses models/gat_ids.pt, which scripts/finetune_on_lab.sh
+  # replaces with the lab-fine-tuned model (the InSDN-only model blocks benign lab hosts).
+  checkpoint_path: models/checkpoints/gnn_v2_gat.pt
+  output_path: models/gat_ids_insdn_only.pt
+  graph_path: data/graphs/insdn_v2.pt
+
+# Live IDS (web/app.py). Paths are relative to the project root.
+ids_service:
+  model_path: models/gat_ids.pt
+  window_seconds: 10          # flows active in the last N seconds form one graph
+  attack_threshold: 0.85      # window confidence needed to mitigate
+  suspicious_threshold: 0.5   # logged, not mitigated
+  node_threshold: null        # null -> threshold tuned on validation data
+  cooldown_seconds: 30        # don't re-alert the same host within this time
+  whitelist: []               # never block these (controller, gateway, DNS), CIDR allowed
+  log_dir: logs
+  mitigation_enabled: true
+  idle_timeout: 60
+  hard_timeout: 300
+  victim_rate_pps: 200        # spoofed DDoS: packets/s allowed to the victim
+  scanner_rate_pps: 20        # Probe: packets/s allowed from the scanner
+  confirm_windows: 2          # block only after N consecutive attack windows
+  node_aggregation: mean      # host score over chunks: mean (robust) or max
+  spoof_threshold: 20         # DDoS with more sources -> rate-limit the victim instead
+  heavy_hitter_flows: 5       # ...but still block hosts with this many flows in the window
+  record_flows_path: null     # e.g. data/mininet/flows.csv to collect labelled data

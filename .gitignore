@@ -25,3 +25,12 @@ models/checkpoints/*
 # OS / editor
 .DS_Store
 .vscode/
+
+# Phase 2 generated artifacts
+data/mininet/
+data/graphs/
+logs/
+models/gat_ids.pt
+models/gat_ids.json
+.pytest_cache/
+models/gat_ids_insdn_only.*

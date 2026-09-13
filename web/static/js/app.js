@@ -368,6 +368,7 @@ function initSidebarHighlight() {
   sections.forEach(s => observer.observe(s));
 
   links.forEach(link => {
+    if (!link.dataset.section) return;  // page links (e.g. /live) navigate normally
     link.addEventListener('click', e => {
       e.preventDefault();
       const target = document.getElementById(link.dataset.section);

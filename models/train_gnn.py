@@ -7,9 +7,18 @@ from collections import Counter
 
 import numpy as np
 import torch
-from sklearn.metrics import accuracy_score, classification_report, f1_score, precision_score, recall_score
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    classification_report,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 from torch import nn
 
+from common.config import parse_args_with_config, run_metadata
 from models.gat_model import GATIntrusionDetector
 from preprocessing.graph_dataset import create_loaders
 
@@ -25,6 +34,40 @@ def _scores(model, loader, device):
             ys.extend(batch.y.view(-1).cpu().tolist())
             scores.extend(prob_attack.cpu().tolist())
     return ys, scores
+
+
+def _ranking_metrics(ys, scores) -> dict:
+    if len(set(ys)) < 2:
+        return {"roc_auc": None, "pr_auc": None}
+    return {
+        "roc_auc": float(roc_auc_score(ys, scores)),
+        "pr_auc": float(average_precision_score(ys, scores)),
+    }
+
+
+def plot_training_curves(history: list[dict], out_path: str) -> None:
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    epochs = [h["epoch"] for h in history]
+    fig, (ax_loss, ax_f1) = plt.subplots(1, 2, figsize=(11, 4))
+    ax_loss.plot(epochs, [h["train_loss"] for h in history], label="train")
+    ax_loss.plot(epochs, [h["argmax"]["loss"] for h in history], label="val")
+    ax_loss.set_title("Loss")
+    ax_loss.set_xlabel("epoch")
+    ax_loss.legend()
+    ax_f1.plot(epochs, [h["argmax"]["f1"] for h in history], label="val F1 @0.5")
+    ax_f1.plot(epochs, [h["threshold_tuned"]["f1"] for h in history], label="val F1 tuned")
+    ax_f1.set_title("Validation F1 (attack class)")
+    ax_f1.set_xlabel("epoch")
+    ax_f1.legend()
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
 
 
 def _metrics_from_scores(ys, scores, threshold: float = 0.5):
@@ -93,17 +136,30 @@ def run(
     epochs: int = 40,
     seed: int = 42,
     batch_size: int = 128,
+    hidden_dim: int = 64,
+    heads: int = 4,
+    dropout: float = 0.25,
+    lr: float = 7e-4,
+    weight_decay: float = 1e-4,
+    patience: int = 10,
+    test_size: float = 0.15,
+    val_size: float = 0.15,
+    split_mode: str = "time",
+    split_gap: int = 0,
+    curves_path: str | None = None,
+    metadata: dict | None = None,
 ) -> None:
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    splits = create_loaders(
-        graph_path=graph_path,
-        batch_size=batch_size,
-        test_size=0.15,
-        val_size=0.15,
-        seed=seed,
-    )
+    split_config = {
+        "test_size": test_size,
+        "val_size": val_size,
+        "seed": seed,
+        "split_mode": split_mode,
+        "split_gap": split_gap,
+    }
+    splits = create_loaders(graph_path=graph_path, batch_size=batch_size, **split_config)
     sample_batch = next(iter(splits.train_loader))
     node_feat_dim = sample_batch.x.shape[1]
     edge_feat_dim = sample_batch.edge_attr.shape[1] if getattr(sample_batch, "edge_attr", None) is not None else 0
@@ -122,20 +178,19 @@ def run(
     model_config = {
         "node_feat_dim": node_feat_dim,
         "edge_feat_dim": edge_feat_dim,
-        "hidden_dim": 64,
-        "heads": 4,
-        "dropout": 0.25,
+        "hidden_dim": hidden_dim,
+        "heads": heads,
+        "dropout": dropout,
         "num_classes": 2,
     }
     model = GATIntrusionDetector(**model_config).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=7e-4, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
 
     best_val_f1 = -1.0
     best_val_loss = float("inf")
     best_threshold_value = 0.5
     best_epoch = 0
-    patience = 10
     min_delta = 1e-4
     wait = 0
     history = []
@@ -198,6 +253,7 @@ def run(
                     "best_val_loss": best_val_loss,
                     "epoch": best_epoch,
                     "seed": seed,
+                    "split_config": split_config,
                 },
                 checkpoint_path,
             )
@@ -211,7 +267,11 @@ def run(
     model.load_state_dict(checkpoint["model_state_dict"])
     test_y, test_scores = _scores(model, splits.test_loader, device)
     test_metrics = _metrics_from_scores(test_y, test_scores, threshold=best_threshold_value)
+    test_metrics.update(_ranking_metrics(test_y, test_scores))
     argmax_test_metrics = _metrics_from_scores(test_y, test_scores, threshold=0.5)
+    if curves_path:
+        plot_training_curves(history, curves_path)
+        print(f"Saved training curves -> {curves_path}")
     out = {
         "best_val_f1": best_val_f1,
         "best_val_loss": best_val_loss,
@@ -226,6 +286,13 @@ def run(
         "model_config": model_config,
         "feature_stats": splits.feature_stats.to_dict() if splits.feature_stats else None,
         "checkpoint": checkpoint_path,
+        "split_config": split_config,
+        "split_sizes": {
+            "train": len(splits.train_loader.dataset),
+            "val": len(splits.val_loader.dataset),
+            "test": len(splits.test_loader.dataset),
+        },
+        "run": metadata or {},
     }
 
     os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
@@ -242,7 +309,18 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch-size", type=int, default=128)
-    args = parser.parse_args()
+    parser.add_argument("--hidden-dim", type=int, default=64)
+    parser.add_argument("--heads", type=int, default=4)
+    parser.add_argument("--dropout", type=float, default=0.25)
+    parser.add_argument("--lr", type=float, default=7e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--test-size", type=float, default=0.15)
+    parser.add_argument("--val-size", type=float, default=0.15)
+    parser.add_argument("--split-mode", choices=["time", "random"], default="time")
+    parser.add_argument("--split-gap", type=int, default=0)
+    parser.add_argument("--curves-path", default="results/training_curves.png")
+    args, _ = parse_args_with_config(parser, "train_gnn")
     run(
         graph_path=args.graph_path,
         checkpoint_path=args.checkpoint_path,
@@ -250,6 +328,18 @@ def main() -> None:
         epochs=args.epochs,
         seed=args.seed,
         batch_size=args.batch_size,
+        hidden_dim=args.hidden_dim,
+        heads=args.heads,
+        dropout=args.dropout,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        patience=args.patience,
+        test_size=args.test_size,
+        val_size=args.val_size,
+        split_mode=args.split_mode,
+        split_gap=args.split_gap,
+        curves_path=args.curves_path,
+        metadata=run_metadata(args),
     )
 
 
