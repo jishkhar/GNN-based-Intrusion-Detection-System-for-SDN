@@ -22,3 +22,7 @@ GNN_METRICS_FILE = RESULTS_DIR / "gnn_metrics.json"
 BASELINE_METRICS_FILE = RESULTS_DIR / "baseline_metrics.json"
 GNN_CLASSIFICATION_REPORT_FILE = RESULTS_DIR / "gnn_classification_report.json"
 PHASE2_RESULTS_DIR = RESULTS_DIR / "phase2"
+
+# Progress of scripts/run_all.sh (written by scripts/pipeline_status.py)
+PIPELINE_DIR = PROJECT_ROOT / "logs" / "pipeline"
+PIPELINE_STATUS_FILE = PIPELINE_DIR / "status.json"

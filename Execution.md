@@ -4,9 +4,52 @@ This document explains how to run the Phase 1 MVP end-to-end for the GNN-based I
 
 ---
 
+## Run everything with one command
+
+`scripts/run_all.sh` runs every phase in order and shows progress on the website:
+
+```bash
+bash scripts/run_all.sh                  # everything, including the Phase 2 ablations
+bash scripts/run_all.sh --quick          # skip the ablations (~15 min of Phase 2 training instead of ~70)
+bash scripts/run_all.sh --skip-training  # reuse the trained models: tests, replay, live demo, report
+```
+
+While it runs, open:
+
+- http://127.0.0.1:3000/pipeline shows each stage's progress, the live log of the current stage and
+  the headline results as they are written.
+- http://127.0.0.1:3000/live shows detections and blocking rules during the replay and live-demo stages.
+- http://127.0.0.1:3000/ shows the offline evaluation (reload it after the training stages).
+
+| # | Stage | What it does |
+|---:|---|---|
+| 1 | preflight | checks the Python packages, datasets, Docker and that the port is free |
+| 2 | dashboard | starts the web app (it stays up for the whole run) |
+| 3 | phase1 | Phase 1 on CICIDS2017: clean, baselines, graph snapshots, GAT, evaluation |
+| 4 | clean_insdn | Phase 2 cleaning of InSDN |
+| 5 | phase2_train | InSDN graphs, baselines, multi-task GNN, ablations, TorchScript export |
+| 6 | tests | `pytest` |
+| 7 | replay | held-out InSDN flows replayed through the running IDS in real time (~4 min) |
+| 8 | latency | latency benchmark |
+| 9 | live_demo | Docker lab: os-ken controller, Mininet, attack scenarios, automatic blocking |
+| 10 | report | `results/phase2/final_results.md` |
+
+Other options: `--skip-phase1`, `--skip-live` (no Docker), `--no-serve` (stop the dashboard at the end;
+by default it stays up until Ctrl+C). Environment variables: `PORT` (default 3000), `PYTHON`, and the
+live-demo settings `SCENARIO`, `DURATION`, `REPEAT`, `DATAPATH` (see section 15), for example
+`SCENARIO=ddos bash scripts/run_all.sh --skip-training`.
+
+- If a cleaning or Phase 2 training stage fails, the run stops. Any other failed stage is marked on
+  the page and the run continues.
+- Stage logs are in `logs/pipeline/<run id>/`.
+- The live demo's files are in `data/mininet/run_all_<run id>/`.
+- The API key for the manual block/unblock form on `/live` is printed at the end of the run.
+- If port 3000 is busy (for example a dashboard left running by `KEEP_IDS=1`), stop that process or
+  use `PORT=3001`.
+
 ## Quick start (Phase 2)
 
-Run all commands from the project root:
+These are the same steps as `run_all.sh`, run by hand. Run all commands from the project root:
 
 ```bash
 cd ~/Projects/GNN-based-Intrusion-Detection-System-for-SDN

@@ -16,7 +16,9 @@ Environment variables:
 import asyncio
 import json
 import os
+import re
 import sys
+import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -33,6 +35,8 @@ from config import (
     GNN_CLASSIFICATION_REPORT_FILE,
     GNN_METRICS_FILE,
     PHASE2_RESULTS_DIR,
+    PIPELINE_DIR,
+    PIPELINE_STATUS_FILE,
     PROJECT_ROOT,
     STATIC_DIR,
 )
@@ -119,6 +123,11 @@ async def live_page():
     return FileResponse(str(STATIC_DIR / "live.html"))
 
 
+@app.get("/pipeline")
+async def pipeline_page():
+    return FileResponse(str(STATIC_DIR / "pipeline.html"))
+
+
 # ------------------------------------------------------- offline results
 @app.get("/api/metrics/gnn")
 async def get_gnn_metrics():
@@ -178,6 +187,107 @@ async def health_check():
         "live_ids": service is not None,
         "live_ids_error": service_error,
     }
+
+
+# ------------------------------------------------ master pipeline progress
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def _log_tail(rel_path: str, lines: int) -> list[str]:
+    """Last lines of a stage log; progress bars (carriage returns) keep only their final state."""
+    path = (PROJECT_ROOT / rel_path).resolve()
+    if PIPELINE_DIR.resolve() not in path.parents or not path.is_file():
+        return []
+    with open(path, "rb") as f:
+        f.seek(max(0, path.stat().st_size - 256 * 1024))
+        text = f.read().decode("utf-8", errors="replace")
+    out = [_ANSI.sub("", line.rsplit("\r", 1)[-1]) for line in text.split("\n")]
+    while out and not out[-1].strip():
+        out.pop()
+    return out[-lines:]
+
+
+def _dig(data, *keys):
+    for key in keys:
+        if not isinstance(data, dict) or key not in data:
+            return None
+        data = data[key]
+    return data
+
+
+def _result(label: str, path: Path, value, fmt: str, detail: str = "") -> dict | None:
+    if value is None:
+        return None
+    return {"label": label, "value": fmt.format(value), "detail": detail,
+            "file": str(path.relative_to(PROJECT_ROOT)), "mtime": path.stat().st_mtime}
+
+
+def _key_results(session: str | None) -> list[dict]:
+    """Headline numbers from whatever result files exist (each file is optional)."""
+    def load(path: Path):
+        data = _read_json(path) if path.exists() else None
+        return None if not data or "error" in data else data
+
+    results = []
+    p1 = GNN_METRICS_FILE
+    if (d := load(p1)):
+        results.append(_result("Phase 1 GNN attack F1", p1, _dig(d, "test", "f1"), "{:.3f}", "CICIDS2017, binary"))
+    gnn_path, base_path = PHASE2_RESULTS_DIR / "gnn_v2_gat.json", PHASE2_RESULTS_DIR / "baselines_v2.json"
+    gnn, base = load(gnn_path), load(base_path)
+    if gnn:
+        ours = _dig(gnn, "test", "window", "multiclass", "major_macro_f1")
+        detail = "InSDN, main classes"
+        if base:
+            scores = [_dig(base, m, "window", "multiclass", "major_macro_f1") for m in ("random_forest", "xgboost")]
+            scores = [s for s in scores if s is not None]
+            if scores:
+                detail += f"; best baseline {max(scores):.3f}"
+        results.append(_result("Phase 2 attack-type macro-F1", gnn_path, ours, "{:.3f}", detail))
+        results.append(_result("Phase 2 attacker-host F1", gnn_path, _dig(gnn, "test", "host", "f1"), "{:.3f}", "per-host head"))
+    replay_path = PHASE2_RESULTS_DIR / "replay_report.json"
+    if (d := load(replay_path)):
+        attacks = d.get("attacks") or {}
+        detected = sum(1 for a in attacks.values() if a.get("detected"))
+        results.append(_result("Replay: attacks detected", replay_path, f"{detected}/{len(attacks)}", "{}",
+                               f"benign false-positive rate {100 * (_dig(d, 'benign', 'false_positive_rate') or 0):.1f} %"))
+    lat_path = PHASE2_RESULTS_DIR / "latency_report.json"
+    if (d := load(lat_path)) and d.get("devices"):
+        device, rep = next(iter(d["devices"].items()))
+        results.append(_result("Detection latency p90", lat_path, _dig(rep, "service", "service_total", "p90"),
+                               "{:.1f} ms", f"full service path, {device}"))
+    if session:
+        mit_path = PROJECT_ROOT / session / "mitigation_report.json"
+        if (d := load(mit_path)) and (s := d.get("summary")):
+            results.append(_result("Live demo: attack traffic dropped", mit_path, _dig(s, "drop_rate", "mean"), "{:.0%}",
+                                   f"{_dig(s, 'drop_rate', 'runs_meeting_70pct')}/{s.get('mitigated_runs')} runs ≥ 70 %, "
+                                   f"{s.get('attack_runs_with_false_blocks', 0)} runs blocking a benign host"))
+            results.append(_result("Live demo: time to mitigation", mit_path, _dig(s, "time_to_mitigation_s", "p50"),
+                                   "{:.1f} s", "median from attack start"))
+    return [r for r in results if r]
+
+
+@app.get("/api/pipeline")
+def pipeline_status(stage: str | None = None, lines: int = 120):
+    """Progress of the latest ``scripts/run_all.sh`` run, with a stage's log tail and headline results."""
+    status = _read_json(PIPELINE_STATUS_FILE)
+    if "error" in status:
+        return {"state": "none", "message": "No pipeline run yet. Start one with: bash scripts/run_all.sh",
+                "results": _key_results(None), "server_time": time.time()}
+    stages = status.get("stages", [])
+    for s in stages:
+        s["outputs"] = [
+            {"path": p, "exists": (PROJECT_ROOT / p).exists(),
+             "mtime": (PROJECT_ROOT / p).stat().st_mtime if (PROJECT_ROOT / p).exists() else None}
+            for p in s.get("outputs", [])
+        ]
+    started = [s for s in stages if s.get("state") != "pending"]
+    focus = next((s for s in stages if s["id"] == stage), None) or \
+        next((s for s in stages if s["id"] == status.get("current")), None) or (started[-1] if started else None)
+    status["log_stage"] = focus["id"] if focus else None
+    status["log_tail"] = _log_tail(focus["log"], max(1, min(lines, 500))) if focus else []
+    status["results"] = _key_results(status.get("session"))
+    status["server_time"] = time.time()
+    return status
 
 
 # ------------------------------------------------------------- live IDS
