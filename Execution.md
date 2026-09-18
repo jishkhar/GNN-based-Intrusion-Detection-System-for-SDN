@@ -4,6 +4,61 @@ This document explains how to run the Phase 1 MVP end-to-end for the GNN-based I
 
 ---
 
+## Quick start (Phase 2)
+
+Run all commands from the project root:
+
+```bash
+cd ~/Projects/GNN-based-Intrusion-Detection-System-for-SDN
+source .venv/bin/activate
+```
+
+### 1. Setup (only on a new machine)
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt -r web/requirements.txt
+```
+
+Put the InSDN CSVs (`Normal_data.csv`, `OVS.csv`, `metasploitable-2.csv`) in `data/insdn/raw/`.
+
+### 2. Clean the data
+
+```bash
+python -m preprocessing.clean_data --input-glob "data/insdn/raw/*.csv" --output-dir data/insdn/cleaned
+```
+
+### 3. Offline training pipeline
+
+This builds the graphs, trains the baselines and the GNN, runs the ablations and exports the model.
+
+```bash
+PYTHON=.venv/bin/python bash scripts/run_phase2_training.sh                   # ~70 min
+PYTHON=.venv/bin/python bash scripts/run_phase2_training.sh --skip-ablations  # ~15 min
+```
+
+### 4. Tests and a live check without Mininet
+
+```bash
+python -m pytest tests -q
+python scripts/replay_flows.py        # replays held-out flows through the live IDS
+python scripts/benchmark_latency.py
+```
+
+### 5. Live SDN demo (the main demo)
+
+```bash
+docker build -t gnn-ids-lab -f docker/Dockerfile.sdn-lab docker/   # only if the image is missing
+KEEP_IDS=1 bash scripts/run_phase2_demo.sh
+```
+
+While it runs, open http://127.0.0.1:3000/live to watch the alerts, the installed rules and the attack
+traffic being dropped.
+
+The sections below give the full details for Phase 1 (sections 1–11) and Phase 2 (sections 12–18).
+
+---
+
 ## 1) Prerequisites
 
 - OS: Linux (recommended)
