@@ -21,6 +21,21 @@ graph_builder_v2:
   val_size: 0.15
   seed: 42
 
+feature_selection:
+  graph_path: data/graphs/insdn_v2.pt
+  output_path: results/phase2/feature_selection.json
+  seed: 42
+  max_samples: 60000
+  estimators: 80
+  tolerance: 0.002   # prefer fewer dimensions when validation F1 is within this of the best
+
+feature_selection:
+  # Compares selection (ANOVA, MI, RF, L1, RFE) and reduction (PCA, SVD, ICA) methods; shown on the dashboard.
+  graph_path: data/graphs/insdn_v2.pt
+  output_path: results/phase2/feature_selection.json
+  max_rows: 40000
+  seed: 42
+
 baselines_v2:
   graph_path: data/graphs/insdn_v2.pt
   metrics_out: results/phase2/baselines_v2.json
@@ -37,6 +52,8 @@ train_gnn_v2:
   curves_path: results/phase2/gnn_v2_gat_curves.png
   conv_type: gat
   use_edge_features: true
+  # Columns chosen by preprocessing.feature_selection (best non-reduction method per table).
+  feature_selection_path: results/phase2/feature_selection.json
   hidden_dim: 64
   heads: 4
   num_layers: 2

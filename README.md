@@ -58,6 +58,14 @@ Datasets (not in git): put the InSDN CSVs in `data/insdn/raw/`. Optionally, the 
 
 ## Run
 
+Everything in one command, with progress at http://127.0.0.1:3000/pipeline:
+
+```bash
+bash scripts/run_all.sh            # add --quick to skip ablations, --skip-training to reuse models
+```
+
+Or step by step:
+
 ```bash
 # 1. Clean the data
 python -m preprocessing.clean_data --input-glob "data/insdn/raw/*.csv" --output-dir data/insdn/cleaned

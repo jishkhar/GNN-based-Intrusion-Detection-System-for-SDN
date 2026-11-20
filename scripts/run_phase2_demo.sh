@@ -6,6 +6,9 @@
 #   SCENARIO=ddos DURATION=60 REPEAT=5 bash scripts/run_phase2_demo.sh
 #   KEEP_IDS=1 bash scripts/run_phase2_demo.sh            # leave the dashboard running afterwards
 #   COLLECT=1 REPEAT=5 bash scripts/run_phase2_demo.sh    # record labelled data, no mitigation
+#   USE_RUNNING_IDS=1 bash scripts/run_phase2_demo.sh     # reuse the IDS already on :$PORT (scripts/run_all.sh);
+#                                                         # it must have been started with this session's
+#                                                         # IDS_API_KEY, IDS_LOG_DIR and IDS_RECORD_FLOWS
 #
 # Needs: Docker (user in the docker group), the gnn-ids-lab image
 # (docker build -t gnn-ids-lab -f docker/Dockerfile.sdn-lab docker/) and the
@@ -34,16 +37,22 @@ if [[ "${COLLECT:-0}" == "1" ]]; then
   EXTRA_ARGS="--vary-rate"
 fi
 
-echo "[1/5] Starting IDS API on :$PORT (session $SESSION)"
-(cd web && exec "../$PY" -m uvicorn app:app --host 127.0.0.1 --port "$PORT" > "../$SESSION/ids_api.log" 2>&1) &
-IDS_PID=$!
-cleanup() { if [[ "${KEEP_IDS:-0}" != "1" ]]; then kill "$IDS_PID" 2>/dev/null || true; fi; }
+IDS_PID=""
+if [[ "${USE_RUNNING_IDS:-0}" == "1" ]]; then
+  echo "[1/5] Using the IDS API already running on :$PORT (session $SESSION)"
+else
+  echo "[1/5] Starting IDS API on :$PORT (session $SESSION)"
+  (cd web && exec "../$PY" -m uvicorn app:app --host 127.0.0.1 --port "$PORT" > "../$SESSION/ids_api.log" 2>&1) &
+  IDS_PID=$!
+fi
+cleanup() { if [[ -n "$IDS_PID" && "${KEEP_IDS:-0}" != "1" ]]; then kill "$IDS_PID" 2>/dev/null || true; fi; }
 trap cleanup EXIT
 for _ in $(seq 1 60); do
   curl -sf "http://127.0.0.1:$PORT/api/health" > /dev/null && break
   sleep 1
 done
-curl -s "http://127.0.0.1:$PORT/api/health" | grep -q '"live_ids":true' || { echo "IDS failed to start"; tail "$SESSION/ids_api.log"; exit 1; }
+curl -s "http://127.0.0.1:$PORT/api/health" | grep -q '"live_ids":true' || {
+  echo "IDS failed to start"; [[ -f "$SESSION/ids_api.log" ]] && tail "$SESSION/ids_api.log"; exit 1; }
 
 echo "[2/5] Lab: controller + Mininet + scenario '$SCENARIO' ($REPEAT x ${DURATION}s)"
 docker run --rm --privileged --network host -v "$PWD":/work \
@@ -69,7 +78,7 @@ $PY -m models.evaluate_v2 --checkpoint-path models/checkpoints/gnn_v2_gat.pt \
   --graph-path "$SESSION/mininet_v2.pt" --split all --out "$SESSION/transfer_eval.json"
 
 echo "Done. Session files in $SESSION/"
-if [[ "${KEEP_IDS:-0}" == "1" ]]; then
+if [[ -n "$IDS_PID" && "${KEEP_IDS:-0}" == "1" ]]; then
   echo "IDS still running: http://127.0.0.1:$PORT/live (API key: $IDS_API_KEY, pid $IDS_PID)"
   trap - EXIT
 fi

@@ -2,6 +2,13 @@
 
 This document is written as a detailed explanation you can use while presenting the generated output files to your guide. The goal is to explain not only the numbers, but also what they mean, why they matter, and what limitations should be honestly mentioned.
 
+It has two parts:
+
+- **Phase 1** (sections 1–23): the offline binary GNN on CICIDS2017-style flow data.
+- **Phase 2** (sections P1–P21): real host-to-host graphs, a multi-task GNN that names the attack type
+  and the attacking hosts, and a live SDN (os-ken controller + Mininet) that blocks attackers
+  automatically. If you have limited time, present Phase 2 and use Phase 1 as background.
+
 ## 1. Short Presentation Summary
 
 You can start with this:
@@ -404,7 +411,13 @@ It is good to mention limitations honestly:
 
 This helps show that you understand the project deeply and are not overclaiming.
 
+Phase 2 addressed most of these limitations: live controller traffic, multi-class detection, real
+host-to-host graphs and automated mitigation (see P2 and P3–P12).
+
 ## 21. Future Work
+
+The list below was the plan at the end of Phase 1. Items 1–5, 8 and 9 were implemented in Phase 2.
+Items 6 and 7 are still open.
 
 Good future improvements to mention:
 
@@ -483,6 +496,8 @@ This proves that graph-based intrusion detection can be implemented and evaluate
 
 The next phase should focus on live SDN integration, topology-aware graph construction, multi-class attack detection, and real-time mitigation through the SDN controller.
 
+(This is what Phase 2 went on to implement; see the Phase 2 part below.)
+
 ## 23. Final Conclusion
 
 The output data shows that the Phase 1 system is working successfully. The GNN model performs very strongly, with approximately `99.80%` accuracy and `99.40%` attack-class F1-score. The confusion matrix shows only `12` errors out of `5965` test graph snapshots.
@@ -521,7 +536,317 @@ Full numbers: `results/phase2/final_results.md`. Design reasoning: `Docs/design_
 
 This is a strong point to make: we found and fixed problems in our own Phase 1 results before building on them.
 
-## P3. Offline results (InSDN test split, same features and split for all models)
+## P3. End-to-end architecture
+
+```
+  SDN lab (Docker container)                            IDS (host machine, web/app.py)
+┌────────────────────────────────┐                   ┌──────────────────────────────────┐
+│ Mininet hosts h1..h6           │                   │ FlowCollector    10 s window     │
+│      │                         │  flow stats       │        ▼                         │
+│ Open vSwitch s1 ═ s2 (OF 1.3)  │  every 2 s        │ InferenceEngine  TorchScript GNN │
+│      ▲  │                      │ ───────────────►  │        ▼                         │
+│ rules│  │stats                 │  POST /api/flows  │ AlertClassifier  thresholds      │
+│      │  ▼                      │                   │        ▼                         │
+│ os-ken controller              │ ◄───────────────  │ MitigationEngine policy + audit  │
+│ table 0: IDS rules             │  rules in the     │                                  │
+│ table 1: forwarding            │  HTTP reply       │ Dashboards: /  and  /live        │
+└────────────────────────────────┘                   └──────────────────────────────────┘
+```
+
+One polling cycle, step by step:
+
+1. The **controller** (`controller/ids_controller.py`) asks every switch for its flow statistics every
+   2 s and POSTs them to the IDS at `/api/flows` (with an `X-API-Key` header).
+2. The **flow collector** (`controller/flow_collector.py`) removes duplicates (the same flow is seen on
+   both switches), keeps flows that were active in the last 10 s and converts them to flow records.
+3. The **inference engine** (`inference/inference_engine.py`) builds a host graph from those records,
+   computes features and runs the GNN. The output is an attack probability and an attack type for the
+   window, plus an attacker score for every host.
+4. The **alert classifier** (`inference/classifier.py`) decides BENIGN / SUSPICIOUS / ATTACK and which
+   hosts are confirmed attackers.
+5. The **mitigation engine** (`mitigation/mitigation_engine.py`) turns an ATTACK decision into OpenFlow
+   rule actions (drop / rate-limit), which go back **in the same HTTP response**.
+6. The controller installs the rules on the switches immediately, so blocking costs no extra round-trip.
+
+The whole IDS side of one cycle (steps 2–5) takes about 10 ms.
+
+How to explain it:
+
+> The switches already count packets and bytes for every flow. The controller collects those counters
+> every two seconds and sends them to our IDS. The IDS turns the last ten seconds of traffic into a graph
+> of hosts, the GNN says whether there is an attack, what kind it is and which hosts are responsible,
+> and the IDS answers with the OpenFlow rules to block them. The controller installs those rules right
+> away.
+
+## P4. Data, labels and graph windows
+
+**Dataset.** InSDN (`Normal_data.csv`, `OVS.csv`, `metasploitable-2.csv`). Unlike the CICIDS2017 files
+we had, it has real IP addresses, ports and timestamps, and it was captured on an SDN testbed.
+
+**Cleaning** (`preprocessing/clean_data.py`) keeps two label columns: `Label` (binary, as in Phase 1)
+and `Attack` (the attack class).
+
+**Eight canonical classes** (`preprocessing/labels.py`, full mapping in `Docs/label_scheme.md`):
+
+| ID | Class | InSDN label |
+|---:|---|---|
+| 0 | Benign | `Normal` |
+| 1 | DDoS | `DDoS` |
+| 2 | DoS | `DoS` |
+| 3 | Probe | `Probe` |
+| 4 | BruteForce | `BFA` |
+| 5 | WebAttack | `Web-Attack` |
+| 6 | Botnet | `BOTNET` |
+| 7 | Other | `U2R` |
+
+An unknown label always maps to `Other`, never to Benign, so a new attack name can never become a
+benign training example.
+
+**Graph windows** (`preprocessing/graph_builder_v2.py`, settings in `configs/phase2.yaml`):
+
+| Setting | Offline (InSDN) | Live (Mininet) |
+|---|---|---|
+| Window | 100 consecutive flows | every flow active in the last 10 s |
+| Stride | 25 flows (10 for the benign file, to balance classes) | a new window every 2 s poll |
+| Why | InSDN timestamps are mostly minute-level, so time windows would give very few graphs | real clock available |
+
+A live window can hold thousands of flows (for example during a DDoS). It is cut into chunks of 200
+records, about the size of a training window, and the chunks run as one batch.
+
+**Three kinds of labels per window:**
+
+| Label | Meaning |
+|---|---|
+| `y_multi` (window) | Most frequent attack class if at least 10 % of the window's flows are attacks, otherwise Benign |
+| `y` (window) | `y_multi != Benign` |
+| `node_y` (host) | 1 if the host **started** at least one attack flow in the window. Victims are 0 |
+
+**Two tricks that make the data realistic:**
+
+- **Benign overlay.** In InSDN, benign and attack traffic come from different captures, so raw windows
+  are "pure". Half of the attack windows get a benign window merged in, so the model has to find the
+  attackers among normal hosts.
+- **Time-ordered split.** Each (file, class) stream is split 70 / 15 / 15 in time order, with a gap so
+  that no flow appears in two splits. Result: **12,458 train / 2,645 validation / 2,677 test** windows.
+
+## P5. OpenFlow-only features
+
+An OpenFlow 1.3 switch reports only a few counters per flow entry: packets, bytes, duration and the
+match fields (IPs, ports, protocol). Phase 1's 78 CICFlowMeter features can't be computed live, so
+Phase 2 uses **only features a switch can give**. They are defined in one module,
+`preprocessing/openflow_features.py`, which both the dataset pipeline and the live IDS call. The model
+therefore sees exactly the same features in training and in production.
+
+| Level | Count | Features |
+|---|---:|---|
+| Edge (one flow) | 16 | packets, bytes, duration, packet rate, byte rate, mean packet size, protocol one-hot (TCP/UDP/ICMP/other), source and destination port bucket (well-known / registered / ephemeral) |
+| Node (one host in the window) | 16 | flows / packets / bytes sent and received, fan-out (distinct destinations), fan-in (distinct sources), distinct destination ports, **destination-port entropy** (scan indicator), distinct incoming source ports, mean outgoing flow duration, protocol mix of outgoing flows |
+
+All features go through `sign(x)·log(1+|x|)` (bytes span 8 orders of magnitude) and are then z-scored
+with the **training split's** mean and standard deviation. Those statistics are saved inside the model
+file, so the live system normalises exactly as in training.
+
+Full schema: `Docs/feature_schema_phase2.md`.
+
+## P6. The multi-task GNN model
+
+Code: `models/gnn_v2.py` (`MultiTaskGNN`). Size: about 65,000 parameters.
+
+```
+node features (16) ──► node MLP ─┐
+edge features (16) ──► edge MLP ─┼─► mean of outgoing / incoming edge embeddings per node ─► node input (64)
+                                 │
+                                 ▼
+             2 × [ GATConv (4 heads × 16, uses edge embeddings in attention)
+                   + residual + LayerNorm + ELU + dropout 0.2 ]
+                                 │
+                 ┌───────────────┴───────────────────┐
+                 ▼                                   ▼
+   Node head (per host)                 Graph head (per window)
+   → P(host is an attacker)             mean+max pool of nodes and edges
+                                        → 8 attack classes
+```
+
+Key design points (details in `Docs/design_decisions.md`, D8–D12):
+
+- **Two heads, one model.** The graph head says *whether* and *what* (attack type). The node head says
+  *who* (which host to block). Mitigation needs both.
+- **Messages go both ways.** Traffic is directed, but a pure attacker (for example a spoofed DDoS source)
+  has no incoming edges and would never receive information about its victim. Every edge also gets a
+  reversed copy, with a direction flag added to the edge features.
+- **Edge features inside attention.** GAT uses the flow features to decide which neighbours matter.
+  Every model variant also starts each host from the average of its flows, so the GCN / GraphSAGE
+  ablations differ only in the convolution layer.
+- **Window attack probability = 1 − P(Benign)**, i.e. the probability of all attack classes combined.
+
+## P7. Training, evaluation and export
+
+Code: `models/train_gnn_v2.py`, `baselines/train_baselines_v2.py`, `models/export.py`.
+
+| Setting | Value |
+|---|---|
+| Loss | `0.5 × node loss + 0.5 × graph loss` (both cross-entropy) |
+| Class weights | square-root inverse frequency, capped at 10 (so rare classes don't dominate) |
+| Optimiser | AdamW, learning rate 0.001, weight decay 0.0001 |
+| Batch size / epochs | 64 / up to 60, early stopping after 10 epochs without improvement |
+| Model selection | mean of validation window F1, host F1 and attack-type macro-F1 (major classes) |
+| Thresholds | window and host thresholds tuned on the validation split, stored with the model |
+
+**Fair baselines.** Random Forest (200 trees) and XGBoost (300 trees) use the **same features and the
+same split**. They score each flow and average per window. For hosts, they get the same per-host
+features as the GNN. All models use the same metric code (`common/metrics.py`).
+
+**Ablations.** GCN, GraphSAGE, GAT without edge features, and window sizes 50 and 200.
+
+**Export.** The best checkpoint is exported as one **TorchScript** file with an embedded JSON bundle
+(normalisation statistics, class names, thresholds, feature names). The live engine loads that one
+file, so the model can never be paired with the wrong statistics. The export is checked to give the
+same output as the original model on 100 test graphs.
+
+| File | What it is |
+|---|---|
+| `models/gat_ids_insdn_only.pt` | trained on InSDN only |
+| `models/gat_ids.pt` | **the live model**: fine-tuned on InSDN + lab traffic (P12) |
+
+The whole offline pipeline is one command: `bash scripts/run_phase2_training.sh`.
+
+## P8. Live detection: controller, collector, inference, alerts
+
+**Controller** (`controller/ids_controller.py`, started with `controller/run_controller.py`):
+
+- os-ken 2.8.1 (the maintained fork of Ryu), OpenFlow 1.3.
+- **Two flow tables.** Table 0 holds only IDS rules (drop, or meter + continue). Table 1 does forwarding.
+  IDS rules therefore never appear in the statistics used for detection, and unblocking is one delete.
+- **Forwarding by 5-tuple.** Each IPv4 flow gets its own forwarding entry, so the switch keeps
+  per-flow counters. A plain MAC-learning switch would give no per-host statistics. `--match-mode
+  host_pair` gives coarser entries when a flood fills the flow table.
+- Polls every 2 s. **Fail-open:** if the IDS is down, the network keeps forwarding.
+
+**Inference engine** (`inference/inference_engine.py`): features → chunks of 200 records → GNN. The
+window score is the **maximum** over chunks (one attacking chunk is enough). A host's score is the
+**mean** over the chunks it appears in, so one noisy chunk can't get a benign host blocked. Five
+warm-up calls run at start-up, which brought p99 latency from about 208 ms to about 11 ms.
+
+**Alert classifier** (`inference/classifier.py`):
+
+| Rule | Value |
+|---|---|
+| ATTACK (mitigation allowed) | window confidence ≥ 0.85 |
+| SUSPICIOUS (logged only) | 0.5 ≤ confidence < 0.85 |
+| Attacker host | host score ≥ node threshold (tuned on validation, 0.56 in the live model) |
+| Persistence | a host is blocked only after being flagged in **2 consecutive** ATTACK windows |
+| Cool-down | the same host is not re-alerted within 30 s |
+| Whitelist | infrastructure IPs / CIDRs are never reported as attackers |
+
+All of these live in the `ids_service` section of `configs/phase2.yaml`.
+
+## P9. Mitigation engine
+
+Code: `mitigation/mitigation_engine.py`. It turns decisions into controller-independent JSON rule
+actions. The controller turns them into OpenFlow FlowMods (drop) or meters (rate limits).
+
+| Attack type | Action |
+|---|---|
+| DoS, BruteForce, WebAttack, Other | **drop** all traffic from the attacker |
+| Probe | **rate-limit** the scanner to 20 packets/s |
+| Botnet | **isolate** the host (drop all its outgoing traffic) |
+| DDoS, ≤ 20 sources | drop each source |
+| DDoS, > 20 sources (spoofed) | **rate-limit traffic to the victim** to 200 packets/s; still drop any source with ≥ 5 flows in the window (a real host hiding in the flood) |
+
+Safety rails:
+
+- Rate limits are in **packets per second**, not bits per second: a SYN is only 54 bytes, so a bandwidth
+  limit let the flood straight through.
+- **Priorities by severity:** drop 65535 > rate-limit a source 65435 > protect a victim 65335. Equal
+  priorities let a leftover rule shadow a newer drop rule.
+- **Rules expire:** 60 s idle, 300 s maximum (victim protection: 120 s).
+- Manual **block / unblock** from the dashboard (API-key protected).
+- Every action is appended to `logs/mitigation_log.jsonl`. SUSPICIOUS decisions go to
+  `logs/suspicious_log.jsonl`.
+- `IDS_MITIGATION=0` runs the IDS in detect-only mode.
+
+## P10. SDN lab and attack scenarios
+
+**Lab** (`docker/Dockerfile.sdn-lab`): a privileged Ubuntu 22.04 container with Mininet, Open vSwitch,
+os-ken, hping3, nmap, iperf3, tcpdump and curl. It uses host networking, so the controller inside it
+reaches the IDS at `127.0.0.1:3000`. The IDS itself runs on the host in the normal Python environment.
+
+**Topology** (`topology/sdn_topology.py`): two OpenFlow 1.3 switches, six hosts, 100 Mbit/s links.
+
+```
+h1 (attacker)  ─┐                    ┌─ h4 (web server / victim)
+h2 (client)    ─┼── s1 ══════ s2 ────┼─ h5 (client / iperf server)
+h3 (client)    ─┘                    └─ h6 (attacker 2)
+```
+
+**Scenarios** (`scripts/inject_attack.py`). Each run is benign warm-up → attack → benign cool-down, with
+benign background traffic (clients polling the web server, an iperf stream) throughout:
+
+| Scenario | Attacker | Tool / pattern |
+|---|---|---|
+| `ddos` | h1 + h6 | `hping3` SYN flood to h4:80 with random (spoofed) source IPs |
+| `dos` | h1 | `hping3` SYN flood to h4:80 |
+| `probe` | h6 | `nmap` SYN scan of ports 1–2000 on h4, repeated |
+| `bruteforce` | h1 | loop of short HTTP login requests to h4:2121 |
+| `benign` | — | background traffic only (for false-positive checks) |
+
+Each run writes a ground-truth JSON file (attack type, attacker IPs, victim, start/end, spoofed or not)
+and a packet capture at the victim.
+
+**Demo script** (`scripts/run_phase2_demo.sh`) runs everything and then:
+
+1. measures mitigation from the captures (`scripts/analyze_mitigation.py`): time to mitigation, how
+   much attack traffic was dropped, false blocks;
+2. labels the recorded flows with the ground truth (`scripts/label_mininet_flows.py`);
+3. evaluates the model on those lab graphs.
+
+## P11. Dashboard and API
+
+The FastAPI app (`web/app.py`) serves both the dashboards and the live IDS.
+
+| Page | Shows |
+|---|---|
+| `/` | Offline results: Phase 1 metrics and Phase 2 comparison (GNN vs baselines, ablations) |
+| `/live` | Live monitor: status (BENIGN / SUSPICIOUS / ATTACK), active flows and hosts, active rules and alerts, detection latency p90, live **traffic graph** of hosts, attack-confidence timeline, predicted type and flagged hosts, alert table, active-rule table, manual block / unblock form, mitigation audit log |
+
+Main API endpoints:
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/flows` | controller uploads flow stats; the reply carries mitigation rules (API key) |
+| `GET /api/alerts`, `/api/mitigations`, `/api/mitigations/log` | alerts, active rules, audit log |
+| `POST /api/mitigations/block`, `/unblock` | manual control (API key) |
+| `GET /api/topology`, `/api/live/status`, `/api/live/latency`, `/api/live/stream` | data for the live page |
+| `GET /api/health`, `/api/summary`, `/api/metrics/phase2` | health check and offline results |
+
+## P12. Fine-tuning, tests and output files
+
+**Fine-tuning on lab traffic.** The InSDN-only model blocked benign lab hosts (P14), so lab traffic
+was recorded with mitigation switched off (`COLLECT=1 bash scripts/run_phase2_demo.sh`), labelled, and
+added to training with 2× oversampling (`scripts/finetune_on_lab.sh`). Runs are split whole into
+train / validation / test, so the test runs are completely unseen. The result is installed as
+`models/gat_ids.pt`.
+
+**Tests.** `python -m pytest tests -q` covers the graph builder, preprocessing, the Mininet tools and
+the full live path (collector → GNN → classifier → mitigation → API). The tests use synthetic data and a
+tiny generated model, so they need no dataset or GPU. They run on GitHub Actions on every push.
+
+**Phase 2 output files:**
+
+| File | Purpose |
+|---|---|
+| `results/phase2/final_results.md` | **The main report**: every table in this document, generated by `scripts/make_phase2_report.py` |
+| `results/phase2/gnn_v2_gat.json`, `baselines_v2.json` | GNN and baseline test metrics |
+| `results/phase2/ablation_*.json` | GCN, GraphSAGE, no-edge-features, window 50 / 200 |
+| `results/phase2/gnn_v2_gat_ft.json` | fine-tuned model metrics |
+| `results/phase2/confusion_matrices.png`, `roc_windows.png`, `gnn_v2_gat_curves.png` | plots for the report |
+| `results/phase2/replay_report.json` | replay test (P14 step 1) |
+| `results/phase2/latency_report.json`, `latency_histogram.png` | latency benchmark |
+| `results/phase2/mininet_mitigation_*.json`, `mitigation_timeline.png` | live mitigation runs |
+| `results/phase2/mininet_detection_{before,after}_finetune.json` | lab detection before / after fine-tuning |
+| `Docs/eda_summary.md`, `results/phase2/eda/` | dataset analysis |
+
+## P13. Offline results (InSDN test split, same features and split for all models)
 
 | | Random Forest | XGBoost | GAT-IDS |
 |---|---:|---:|---:|
@@ -546,7 +871,7 @@ How to explain it:
 Ablations: GAT gives the best attack-type score (0.993) vs. GCN 0.984, GraphSAGE 0.911 and GAT without
 edge features 0.981, so attention and edge features both help. GraphSAGE has the best host F1 (0.998).
 
-## P4. From dataset to live network
+## P14. From dataset to live network
 
 1. **Replay test** (held-out InSDN flows through the live code path): every attack detected in all
    windows, all real attacker IPs blocked, DDoS handled by rate-limiting the victim (its sources are
@@ -585,7 +910,7 @@ What each fix was for:
 - *A DoS kept flowing despite a correct drop rule*: a leftover DDoS victim rate-limit had the same
   OpenFlow priority and won the tie. Now drop > rate-limit > victim protection.
 
-## P5. Things we discovered during integration (good discussion points)
+## P15. Things we discovered during integration (good discussion points)
 
 - **The controller is a DoS target.** With 5-tuple forwarding rules, a SYN flood with random source
   ports creates a new flow entry per packet: flow tables reached 60,000 entries, stats polls slowed from
@@ -598,7 +923,7 @@ What each fix was for:
 - **Latency.** p90 ≈ 10 ms per window; 37 ms even for a 5,000-flow window on the laptop GPU.
   The first three calls took ~200 ms (TorchScript warm-up), now paid at start-up.
 
-## P6. Limitations to state
+## P16. Limitations to state
 
 - One real SDN dataset (InSDN) plus our own lab; the CICIDS2017 files with IP columns were not
   available for a cross-dataset test.
@@ -607,7 +932,7 @@ What each fix was for:
 - Detection time is dominated by the 2 s polling interval and the 10 s window, not by the model.
 - Mitigation by IP cannot stop spoofed floods at the source.
 
-## P7. Likely questions
+## P17. Likely questions
 
 **Q. Why not just use XGBoost?** It is as good at *detecting* and at scoring hosts from flows. The GNN
 is clearly better at naming coordinated attacks and gives window type and host scores in one model.
@@ -628,3 +953,94 @@ was blocked in any run, and no rule was installed during benign-only traffic.
 reports statistics every 2 s, the model looks at a 10 s window, and we deliberately wait for 2 attack
 windows before blocking (that removed all false blocks). The model itself answers in ~10 ms. Faster
 detection would need faster polling or packet sampling, which costs controller load.
+
+**Q. Why InSDN and not CICIDS2017 in Phase 2?** The CICIDS2017 files we had (*MachineLearningCVE*)
+have no IP, port or timestamp columns, so no real host graph can be built from them. InSDN has all three
+and was captured on an SDN. The CICIDS2017 *TrafficLabelling* files would plug into the same pipeline.
+
+**Q. Why only OpenFlow features when CICFlowMeter features are richer?** A live controller only gets
+packet and byte counters, duration and match fields from the switch. A model trained on features the
+controller can't produce would not run in the network. The same feature code is used for training and
+live detection.
+
+**Q. How does the GNN find the attacker in a DDoS where the sources are spoofed?** It doesn't need to
+block each source. When a DDoS window has more than 20 sources, the mitigation engine rate-limits traffic
+*to the victim* instead, and still blocks any source with 5 or more flows (a real host).
+
+**Q. What happens if the IDS crashes?** The controller keeps forwarding traffic (fail-open), and
+existing rules expire on their own. The network never goes down because of the IDS.
+
+**Q. Why a Docker container for Mininet?** Mininet needs root and a supported Linux distribution. The
+container (Ubuntu 22.04) runs Mininet, Open vSwitch and the controller, while the IDS runs on the host in
+the normal Python environment.
+
+## P18. Main points to tell your guide (Phase 2)
+
+1. Phase 2 turned the offline model into a working SDN security system: detect → identify → block.
+2. We first fixed three Phase 1 problems: fake topology, wrong InSDN labels and a leaky random split.
+3. Graphs are real host-to-host graphs, and features use only what an OpenFlow switch reports.
+4. One multi-task GAT gives the attack type of the window and an attacker score for every host.
+5. Offline, detection is saturated for every model (≈ 0.999). The GNN names the attack type best
+   (macro-F1 0.993 vs 0.970), i.e. about 75 % fewer attack-type errors on the main classes.
+6. The live loop: controller → flow stats every 2 s → IDS → rules in the reply, in about 10 ms of
+   IDS time.
+7. Mitigation is per attack type (drop, rate-limit, isolate, victim protection), with priorities, expiry,
+   whitelist, manual unblock and an audit log.
+8. The InSDN-only model blocked benign lab hosts. Fine-tuning on lab traffic fixed it (false-positive
+   rate 98.7 % → 1.7 %).
+9. Final live result: 12/12 attack runs with at least 70 % of attack traffic dropped (mean 95 %), no
+   benign host blocked, no rules in benign-only runs, median time to mitigation 4.5 s.
+10. Honest limits: one real dataset, rare classes weak, spoofed DDoS still hurts legitimate clients,
+    detection time bound by polling.
+
+## P19. Suggested explanation script (Phase 2)
+
+You can say:
+
+> In Phase 2 we started by auditing our Phase 1 results. We found that the CICIDS2017 files had no IP
+> addresses, so our graphs had no real topology; InSDN's benign label was misread, so all of InSDN was
+> labelled as attack; and a random split of overlapping windows inflated our scores. We fixed all three
+> before building anything new.
+
+> We then rebuilt the graphs from InSDN. Each graph is a window of traffic where nodes are hosts and
+> edges are flows. We used only features that an OpenFlow switch can report, like packet and byte
+> counts and duration, so that exactly the same model can run on a live switch.
+
+> The model is a multi-task Graph Attention Network. One head predicts the type of attack in the window,
+> the other gives every host a probability of being an attacker. That second head is what makes
+> automatic blocking possible, because it tells us whom to block.
+
+> Offline, every model detects attacks almost perfectly, so the difference is in naming the attack: our
+> GNN reaches a macro-F1 of 0.993 against 0.970 for XGBoost, especially on coordinated attacks like DDoS
+> and port scans.
+
+> For the live system we built an os-ken SDN controller and a Mininet lab in Docker. Every two seconds
+> the controller sends flow statistics to our IDS. The IDS builds the graph, runs the GNN, and sends back
+> OpenFlow rules to drop or rate-limit the attackers, all in about ten milliseconds.
+
+> Our first live test failed in an instructive way: the attack was blocked, but so were benign hosts,
+> because lab traffic looks different from InSDN. We fine-tuned on labelled lab traffic and added
+> safety rules like mean host scores and two-window confirmation. In the final evaluation, every attack
+> run had at least 70 % of its traffic dropped, 95 % on average, and no benign host was ever blocked.
+
+## P20. Phase 2 contribution in one line
+
+```text
+InSDN → OpenFlow features → host graphs → multi-task GAT → TorchScript
+      → os-ken controller + Mininet → live detection → automatic OpenFlow mitigation → dashboard
+```
+
+## P21. Final conclusion (both phases)
+
+Phase 1 showed that a GNN can detect attacks from graph snapshots of network traffic. Phase 2 made
+that result trustworthy and useful. The evaluation was fixed (real topology, correct labels, no
+leakage). The model now names the attack and the attacker. And the system runs inside a real SDN
+control loop, where it blocks attacks automatically and has not blocked a benign host.
+
+The best way to present the result is:
+
+> The GNN is not dramatically better than XGBoost at *detecting* attacks. Both are near perfect on
+> InSDN. Its value is that one graph model names coordinated attacks more accurately and identifies the
+> attacking hosts, fast enough (about 10 ms) to drive automatic mitigation in a live SDN. The biggest
+> lesson was the domain gap: a model is only as good as its match to the network it protects, which is
+> why fine-tuning on the target network was essential.

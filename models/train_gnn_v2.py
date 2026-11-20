@@ -26,7 +26,8 @@ from common.metrics import (
     multiclass_metrics,
 )
 from models.gnn_v2 import MultiTaskGNN, attack_probability
-from preprocessing.graph_dataset import apply_stats_to_graphs, fit_feature_stats
+from preprocessing.feature_selection import load_selection
+from preprocessing.graph_dataset import apply_stats_to_graphs, fit_feature_stats, select_graph_features
 from preprocessing.labels import ATTACK_CLASSES, CLASS_TO_ID
 
 BENIGN_ID = CLASS_TO_ID["Benign"]
@@ -132,6 +133,7 @@ def run(
     seed: int = 42,
     extra_graph_paths: list[str] | None = None,
     extra_oversample: int = 1,
+    feature_selection_path: str | None = None,
     metadata: dict | None = None,
 ) -> dict:
     torch.manual_seed(seed)
@@ -146,6 +148,12 @@ def run(
         data["val"] = data["val"] + more["val"]
         data["test"] = data["test"] + more["test"]
         print(f"+ {extra}: train {len(more['train'])} (x{extra_oversample}), val {len(more['val'])}, test {len(more['test'])}")
+    # Keep only the columns chosen by preprocessing.feature_selection (None -> all features).
+    selection = load_selection(feature_selection_path)
+    if selection:
+        for s in ("train", "val", "test"):
+            data[s] = select_graph_features(data[s], selection)
+        print("Feature selection:", {k: f"{v['method']} ({v['k']} features)" for k, v in selection["methods"].items()})
     stats = fit_feature_stats(data["train"])
     splits = {s: apply_stats_to_graphs(data[s], stats) for s in ("train", "val", "test")}
     loaders = {
@@ -247,6 +255,7 @@ def run(
             "classes": ATTACK_CLASSES,
             "node_feature_names": meta["node_feature_names"],
             "edge_feature_names": meta["edge_feature_names"],
+            "feature_selection": selection,
             "graph_meta": {k: v for k, v in meta.items() if k != "run"},
             "epoch": best_epoch,
         },
@@ -263,6 +272,7 @@ def run(
         "split_sizes": {s: len(g) for s, g in splits.items()},
         "extra_graph_paths": extra_graph_paths or [],
         "extra_oversample": extra_oversample,
+        "feature_selection": selection,
         "test": results,
         "history": history,
         "checkpoint": checkpoint_path,
@@ -305,6 +315,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--extra-graph-paths", nargs="*", default=[], help="more v2 graph files to train on")
     parser.add_argument("--extra-oversample", type=int, default=1)
+    parser.add_argument("--feature-selection-path", default=None,
+                        help="feature_selection.json whose chosen columns are used (default: all features)")
+    parser.add_argument("--no-feature-selection", dest="feature_selection_path", action="store_const", const=None)
     args, _ = parse_args_with_config(parser, "train_gnn_v2")
     kwargs = {k: v for k, v in vars(args).items() if k != "config"}
     run(**kwargs, metadata=run_metadata(args))

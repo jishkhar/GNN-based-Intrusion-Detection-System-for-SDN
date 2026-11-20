@@ -21,7 +21,7 @@ from common.config import run_metadata
 from common.metrics import binary_metrics, coordinated_subset_metrics, detection_rate_by_class, multiclass_metrics
 from models.export import load_checkpoint_model
 from models.train_gnn_v2 import _attack_class, predict, window_multiclass_pred
-from preprocessing.graph_dataset import GraphFeatureStats, apply_stats_to_graphs
+from preprocessing.graph_dataset import GraphFeatureStats, apply_stats_to_graphs, select_graph_features
 
 
 def evaluate(checkpoint_path: str, graph_path: str, split: str = "test", batch_size: int = 64) -> dict:
@@ -30,6 +30,7 @@ def evaluate(checkpoint_path: str, graph_path: str, split: str = "test", batch_s
     model = model.to(device)
     data = torch.load(graph_path, weights_only=False)
     graphs = data["train"] + data["val"] + data["test"] if split == "all" else data[split]
+    graphs = select_graph_features(graphs, ckpt.get("feature_selection"))
     graphs = apply_stats_to_graphs(graphs, GraphFeatureStats.from_dict(ckpt["feature_stats"]))
     loader = DataLoader(graphs, batch_size=batch_size, shuffle=False, exclude_keys=["node_ips"])
 

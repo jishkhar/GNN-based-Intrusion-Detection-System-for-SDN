@@ -1,0 +1,192 @@
+\chapter{Literature Survey}
+
+This chapter summarises the ground work carried out before the design of the system. It covers (i) the security of Software-Defined Networks, (ii) machine-learning and deep-learning intrusion detection in SDN, (iii) graph neural networks and their use for intrusion detection, (iv) the datasets and the evaluation pitfalls reported in the literature, and (v) the supporting tools. The chapter closes with a comparison table and the research gaps that this project addresses.
+
+\section{Security of Software-Defined Networks}
+
+OpenFlow \cite{bib:openflow} introduced the idea of programming the forwarding behaviour of switches through flow tables, and SDN architectures built on it separate the data plane from a logically centralised control plane \cite{bib:kreutz}. Kreutz \emph{et al.} survey this architecture and identify the security of the controller and of the controller--switch channel as open problems, because a single compromised or overloaded controller affects every switch it manages. Yan \emph{et al.} \cite{bib:yan} review DDoS attacks against SDN and in cloud environments built on SDN. They describe how floods of packets with new headers force switches to send many packet-in messages to the controller and fill the flow tables, and they argue that the global view of the controller can also be used to detect and mitigate such attacks. These works establish that (a) SDN is a high-value attack target and (b) the controller is a natural place for detection, which is the starting point of this project.
+
+\section{Machine Learning and Deep Learning for SDN Intrusion Detection}
+
+Braga \emph{et al.} \cite{bib:braga} proposed one of the first lightweight flow-based DDoS detectors for OpenFlow: a NOX controller periodically collects flow statistics, derives six features (such as the average number of packets and bytes per flow, the growth of single flows and the growth of different ports) and classifies them with a Self-Organizing Map. The approach showed that flow-table statistics are enough for flood detection, but it detects only one attack family and does not name the attacker or install mitigation rules.\\
+
+Tang \emph{et al.} \cite{bib:tang} applied a deep neural network to flow-based anomaly detection in SDN using six basic features of the NSL-KDD dataset that can be obtained from an OpenFlow switch. Their work is notable for restricting itself to switch-obtainable features, but the underlying NSL-KDD data is not SDN traffic and the achieved accuracy was modest.\\
+
+Random Forests \cite{bib:rf} and gradient-boosted trees such as XGBoost \cite{bib:xgb} are the strongest tabular baselines in most intrusion-detection benchmarks and are used throughout the literature. Kitsune \cite{bib:kitsune} showed that an ensemble of small autoencoders can detect anomalies online at packet rate without labelled data. All of these treat each flow or packet as an independent instance and cannot reason about the relationships between hosts.\\
+
+Sommer and Paxson \cite{bib:sommer} warn that machine learning for intrusion detection is fundamentally different from other ML tasks: the semantic gap between an anomaly and an attack, the cost of false positives and the variability of real traffic make laboratory accuracy a poor predictor of operational value. This motivated our emphasis on false-positive rate, on a feature set that is identical offline and live, and on evaluation with real attack traffic in an emulated network.
+
+\section{Graph Neural Networks}
+
+Graph Neural Networks, introduced by Scarselli \emph{et al.} \cite{bib:scarselli} and reviewed in \cite{bib:gnnreview}, learn node, edge or graph representations by repeatedly aggregating information from neighbouring nodes. Three layer types are particularly relevant here:
+
+\begin{itemize}
+	\item \textbf{GCN} \cite{bib:gcn} aggregates neighbour features with fixed, degree-based weights.
+	\item \textbf{GraphSAGE} \cite{bib:sage} samples and aggregates neighbour features (mean, pooling, LSTM) and generalises to nodes not seen during training.
+	\item \textbf{GAT} \cite{bib:gat} learns an attention coefficient for every neighbour, so the network decides which neighbours matter. This is suitable for traffic graphs, in which a few flows of a scanning host matter far more than thousands of ordinary flows, and attention can also take edge features into account.
+\end{itemize}
+
+PyTorch Geometric \cite{bib:pyg}, built on PyTorch \cite{bib:pytorch}, provides efficient implementations of these layers and of graph batching and pooling, and is used in this project.
+
+\section{Graph Neural Networks for Network Intrusion Detection}
+
+Lo \emph{et al.} proposed E-GraphSAGE \cite{bib:egraphsage}, in which network flows are the \emph{edges} of a graph of IP endpoints and a GraphSAGE variant that aggregates edge features is used to classify each edge as benign or as an attack type. It improved on the flow-only baselines on several NetFlow datasets and showed that the topology of the flow graph carries useful information. The same group proposed Anomal-E \cite{bib:anomale}, which trains a graph encoder with self-supervised Deep Graph Infomax on edge features and then detects anomalies without labels. These works classify individual edges and are evaluated offline; they do not identify which host should be blocked, and they do not connect to a controller. Their results also depend on datasets whose flow statistics come from tools like NetFlow or CICFlowMeter rather than OpenFlow switches.
+
+\section{Datasets and Evaluation Pitfalls}
+
+The \textbf{InSDN} dataset \cite{bib:insdn} was recorded on an SDN testbed with an Open vSwitch data plane and an SDN controller, with Kali Linux attackers and Metasploitable and web servers as victims. It contains normal traffic and DoS, DDoS, probe (port scan), brute-force, web attack, botnet and U2R attacks, with real IP addresses, ports and timestamps. \textbf{CICIDS2017} \cite{bib:cicids} is a widely used benchmark of a five-day capture with brute-force, DoS, DDoS, web, infiltration, botnet and port-scan attacks, described by CICFlowMeter statistics.\\
+
+Engelen \emph{et al.} \cite{bib:engelen} documented labelling and flow-construction errors in CICIDS2017 that affect published results. In our own analysis the commonly distributed \texttt{MachineLearningCVE} version of CICIDS2017 contains no IP addresses, source ports or timestamps, so it is impossible to build a real host-to-host topology from it; InSDN was therefore chosen as the primary dataset (Chapter~3 and Appendix~D). We additionally observed that a random split of overlapping sliding windows leaks near-identical windows between training and test sets and inflates scores, which led to the time-ordered split of Chapter~4.
+
+
+\section{Attack Surface of an SDN}
+An SDN has three attack surfaces, which differ from those of a traditional network \cite{bib:kreutz,bib:yan}. Table~\ref{tab:surface} lists them. The attacks studied in this project mostly act on the data plane (they are carried by ordinary traffic), but they are dangerous because of their effect on the control plane: every new flow that matches no flow entry is sent to the controller, so a flood of packets with new headers causes a flood of packet-in messages and flow-table entries.
+
+\begin{table}[htbp]
+\centering
+\caption{Attack surfaces of an SDN}
+\label{tab:surface}
+\small
+\begin{tabularx}{\textwidth}{|p{2.8cm}|X|X|}
+\hline
+\textbf{Surface} & \textbf{Example attacks} & \textbf{Effect} \\ \hline
+Data plane (hosts and switches) & Flooding (DoS, DDoS) with spoofed or real sources; port scans; brute force & Exhausts bandwidth, switch flow tables and server resources; reveals the topology and services \\ \hline
+Control plane (controller) & Packet-in flooding; saturation of the controller; compromised controller applications & Loss of control of the whole network; wrong flow rules \\ \hline
+Southbound channel & Eavesdropping, modification or flooding of OpenFlow messages & Hijacking of the forwarding behaviour \\ \hline
+\end{tabularx}
+\end{table}
+
+\section{Detailed Review of Selected Works}
+
+\subsection{Lightweight DDoS detection with NOX/OpenFlow (Braga et al.)}
+Braga \emph{et al.} \cite{bib:braga} implemented the detector as a module of the NOX controller. The controller collects the flow table of the switches at a fixed interval and computes six features of the flow table: the average number of packets per flow, the average number of bytes per flow, the average duration of the flows, the percentage of pair flows (flows with a flow in the reverse direction), the growth rate of single flows and the growth rate of different ports. A Self-Organizing Map is trained with these vectors to separate normal from flooding traffic. The authors reported high detection and low false-alarm rates in an emulated testbed, with a small overhead. \emph{Relevance:} the work is the origin of the idea that the flow-table statistics of an OpenFlow switch are sufficient to detect floods, and the ``pair flow'' feature is an early use of flow \emph{relationships}. \emph{Limitations:} one attack family, six hand-made aggregate features for the whole switch (the individual hosts are not identified), no mitigation.
+
+\subsection{Deep learning for flow-based anomaly detection in SDN (Tang et al.)}
+Tang \emph{et al.} \cite{bib:tang} trained a deep neural network on NSL-KDD \cite{bib:nslkdd}, restricted to six features that can be extracted from an OpenFlow switch (such as duration, protocol type, source and destination bytes and connection counts). They compared it with other classifiers and discussed the deployment on an SDN controller. \emph{Relevance:} it is an early example of choosing the features according to what the switch can supply, the same principle as in this project. \emph{Limitations:} NSL-KDD is a derivative of a 1999 dataset and is not SDN traffic; the reported accuracy was modest (around 75\%), and the model classifies single connections.
+
+\subsection{Kitsune (Mirsky et al.)}
+Kitsune \cite{bib:kitsune} extracts 115 damped incremental statistics from each packet and feeds them to KitNET, an ensemble of small autoencoders that are trained online without labels; the anomaly score is the reconstruction error. It can run on resource-limited hardware at packet rate and was evaluated on several attacks including DoS, reconnaissance and man-in-the-middle. \emph{Relevance:} shows how much an online, unsupervised, lightweight detector can achieve and the importance of low overhead. \emph{Limitations:} it works on packets (needs a tap or mirror), an alert says that traffic is anomalous but not the attack type or the attacker, and the threshold must be chosen without labels.
+
+\subsection{E-GraphSAGE (Lo et al.)}
+In E-GraphSAGE \cite{bib:egraphsage} a network flow is an \emph{edge} between two endpoints, the flow features are the edge features, and the node features are constant. The GraphSAGE aggregation is modified so that the edge features take part in the message and the final edge representation (from the two end nodes) is classified. The paper evaluated it on several NetFlow-based IoT datasets and compared with a multilayer perceptron, Random Forest and other baselines, reporting improvements. \emph{Relevance:} the closest published model to the one of this project, which also uses edge features and host nodes. \emph{Differences:} it classifies edges; it has no host head and no windows; it uses NetFlow-style features, not OpenFlow-only ones; it does not connect to a controller.
+
+\subsection{Anomal-E (Caville et al.)}
+Anomal-E \cite{bib:anomale} trains an edge-feature graph encoder with Deep Graph Infomax, a self-supervised objective that does not need labels, and then applies an anomaly detector (isolation forest) to the learned edge embeddings. The authors reported that the embeddings give better anomaly detection than raw features. \emph{Relevance:} shows that the graph structure helps even without labels, which is an interesting direction for the domain-shift problem observed in this project. \emph{Limitations:} offline, edge-level, no mitigation.
+
+\subsection{Methodological papers (Sommer and Paxson; Engelen et al.)}
+Sommer and Paxson \cite{bib:sommer} explain why machine learning for intrusion detection is difficult: the cost of errors is high, the variety of normal traffic is very large, the results of one environment do not transfer to another, and the evaluation is hard. Engelen \emph{et al.} \cite{bib:engelen} re-examined CICIDS2017 and found errors in the construction of the flows and in the labels, and published a corrected version. Both are important for this project: they motivated the leakage-free split, the lab test, and the decision to report the limitations.
+
+\section{Graph Layers in Detail}
+Three graph layers are used in the project. With $\mathcal{N}(i)$ the neighbours of node $i$ and $h_i^{(l)}$ its representation in layer $l$:
+\begin{align}
+\text{GCN \cite{bib:gcn}:}\quad & h_i^{(l+1)}=\sigma\Big(\sum_{j\in\mathcal{N}(i)\cup\{i\}}\frac{1}{\sqrt{\tilde d_i\tilde d_j}}\,W h_j^{(l)}\Big), \label{eq:gcn}\\
+\text{GraphSAGE \cite{bib:sage}:}\quad & h_i^{(l+1)}=\sigma\Big(W\big[h_i^{(l)}\,\|\,\operatorname{mean}_{j\in\mathcal{N}(i)}h_j^{(l)}\big]\Big), \label{eq:sage}\\
+\text{GAT \cite{bib:gat}:}\quad & h_i^{(l+1)}=\sigma\Big(\sum_{j\in\mathcal{N}(i)}\alpha_{ij}\,W h_j^{(l)}\Big),\quad \alpha_{ij}=\operatorname{softmax}_j(e_{ij}), \label{eq:gatsimple}
+\end{align}
+where $\tilde d_i$ is the degree of node $i$ including the self-loop, $\|$ is concatenation and $e_{ij}$ is a learned score of the pair (Equation~\ref{eq:gat} gives the version with edge features used here). In GCN, the weight of a neighbour depends only on the degrees, so a victim that receives flows from 100 sources gives every source the same small weight. GraphSAGE keeps the node's own representation separate from the aggregated one, which is helpful for distinguishing the central node of a star, but the mean aggregation hides the number of neighbours. GAT learns the weights; with the edge features in the score, it can give a large weight to the neighbour whose flow is unusual (a flow with very small packets, a high rate, or a scanning pattern). The ablations of Chapter~7 compare these three under the same conditions.
+
+\section{Datasets Compared}
+\begin{table}[htbp]
+\centering
+\caption{Intrusion detection datasets considered}
+\label{tab:datasets}
+\small
+\begin{tabularx}{\textwidth}{|p{2.5cm}|p{1.6cm}|X|X|}
+\hline
+\textbf{Dataset} & \textbf{Year} & \textbf{Description} & \textbf{Suitability for this project} \\ \hline
+NSL-KDD \cite{bib:nslkdd} & 2009 & Cleaned version of KDD Cup 99; 41 connection features & Not SDN traffic, old attacks, no host topology; unsuitable \\ \hline
+UNSW-NB15 \cite{bib:unsw} & 2015 & Synthetic modern attacks (nine families) generated in a testbed; 49 features & Not SDN; flow features partly not available from OpenFlow \\ \hline
+CICIDS2017 \cite{bib:cicids} & 2017 & Five days of traffic with many attack families; more than 80 CICFlowMeter features; known label problems \cite{bib:engelen} & The commonly used variant has no IP addresses, so no host graph; the version with IP addresses can be used with the same pipeline \\ \hline
+InSDN \cite{bib:insdn} & 2020 & Recorded on an SDN testbed (Open vSwitch with a controller); normal traffic and seven attack classes; IP addresses, ports, timestamps & Chosen: SDN-specific, has the information needed for host graphs \\ \hline
+\end{tabularx}
+\end{table}
+
+\section{Scalability and Explainability of Graph-Based Detectors}
+A GNN detector has two practical issues. \emph{Scalability:} the cost grows with the number of nodes and edges of a window; for a large network the graph can be partitioned, sampled or processed in chunks, as is done here. \emph{Explainability:} operators need to know why a host was blocked. The attacker score per host and the class probabilities are given with each alert; attention coefficients of the GAT could be used to show which neighbours contributed, which is future work. Both aspects are important for adoption, and they are reflected in the future-work section of Chapter~8.
+
+\section{Supporting Tools}
+
+Mininet \cite{bib:mininet} creates a virtual network of hosts and switches on a single machine, and Open vSwitch \cite{bib:ovs} is the production-quality OpenFlow switch that Mininet uses. The os-ken framework is the maintained fork of the Ryu controller and offers the same Python OpenFlow API. FastAPI serves the IDS, and Docker is used to package the laboratory.
+
+
+\section{Attacks Considered and Their Footprint}
+
+The attacks used in this project differ in the footprint they leave in flow statistics and in a host graph. This footprint is what a model can learn, and it explains why graph structure is expected to help. Table~\ref{tab:footprint} summarises it.
+
+\begin{table}[htbp]
+\centering
+\caption{Footprint of the attacks in flow statistics and in the host graph}
+\label{tab:footprint}
+\small
+\begin{tabularx}{\textwidth}{|p{2.2cm}|X|X|}
+\hline
+\textbf{Attack} & \textbf{Footprint in flow statistics} & \textbf{Shape of the host graph} \\ \hline
+DDoS (spoofed) & Very many flows with one or two packets each, random source addresses, one destination port & Star: about 100 attacker nodes of out-degree 1 converge on one victim of very high in-degree \\ \hline
+DoS & Few sources, many flows per source on few ports, high packet rate & Two hosts joined by many parallel edges (about 100 flows from the single attacker) \\ \hline
+Probe & Many short flows from one source to many destination ports; small packets & One attacker and one victim; destination-port entropy and the number of distinct ports of the attacker are high \\ \hline
+BruteForce & Repeated connections to one service from one source & Same shape as DoS (one attacker, one victim, about 100 flows per window); distinguished by flow features such as rate and size \\ \hline
+Botnet & Very few flows (164 in the dataset), about 50 flows per attacker host, moderate destination-port entropy (about 0.7 bits) & Small graphs of about four hosts with two initiating hosts \\ \hline
+Benign & A few busy internal hosts talking to many external services & Larger graphs (median 22 hosts per window, maximum in-degree 19) with low port entropy per host \\ \hline
+\end{tabularx}
+\end{table}
+
+The per-class statistics of Table~\ref{tab:footprint} were measured on the InSDN windows (Appendix~D). They show that DDoS, DoS and Probe differ mainly in the \emph{graph} (number of sources, in-degree, flows per source) and much less in any single flow, which is the case for a graph-based classifier.
+
+\section{Approaches to Intrusion Detection}
+
+\subsection{Signature, anomaly and hybrid detection}
+Signature-based detection (for example Snort and Suricata rules) is precise for known attacks but cannot detect new ones and needs constant maintenance. Anomaly-based detection models normal traffic and treats deviations as attacks; it can find unknown attacks, but, as Sommer and Paxson \cite{bib:sommer} argue, the semantic gap between an unusual and a malicious event makes false alarms a serious problem. Supervised classification, used in this work, needs labelled attacks but gives the best accuracy on the attack types that are known, and can name the type, which is needed to choose a mitigation.
+
+\subsection{Packet-based, flow-based and graph-based observation}
+Packet-based detectors (Kitsune \cite{bib:kitsune}) see every packet and give the finest detail, but their cost grows with the traffic rate and they need a tap or a mirror port. Flow-based detectors, as in the SDN works of Braga \cite{bib:braga} and Tang \cite{bib:tang}, use the counters that the switch already keeps, so they add little overhead; this makes them attractive for SDN. Graph-based detectors add the relationships between the flows \cite{bib:egraphsage,bib:anomale}. The design of this project is a flow-based, graph-based detector, because it adds the relational information without changing what the switch has to report.
+
+\subsection{Placement of detection in an SDN}
+Detection can run in the controller, in a separate application connected through the northbound interface, or on the switches. Running inside the controller gives the simplest access to the statistics but makes the controller heavier, and the controller is already a bottleneck under attack \cite{bib:yan}. The design chosen here keeps only a thin polling and installation layer in the controller, and puts the detection in a separate service, so that an overloaded or crashing IDS does not stop forwarding (fail-open).
+
+\section{Feature Selection and Dimensionality Reduction}
+Selecting a small set of informative features reduces computation, over-fitting and the amount of data a switch has to report \cite{bib:guyon}. Methods fall into three groups. \emph{Filter} methods score every feature independently of the model, for example the ANOVA F-test and mutual information. \emph{Wrapper} methods such as Recursive Feature Elimination (RFE) repeatedly train a model and remove the weakest feature. \emph{Embedded} methods, such as L1-regularised logistic regression and tree-based importance, select features during training. \emph{Dimensionality reduction} methods construct new features: Principal Component Analysis (PCA) \cite{bib:pca} projects the data on the directions of highest variance, truncated SVD does the same without centring, and Independent Component Analysis (ICA) \cite{bib:ica} looks for statistically independent components. Reduced features are linear combinations of all inputs, so unlike a selected subset they cannot be dropped from the collection process; for a controller that has to compute the features live, this is a disadvantage. This project compares all of these methods on the OpenFlow features (Chapter~7).
+
+\section{Class Imbalance}
+Intrusion datasets are imbalanced: in InSDN, flows of the minor classes (WebAttack 192, Botnet 164, Other 17) are tiny compared with DDoS or DoS (about 50,000 to 74,000 each). Approaches reviewed in \cite{bib:imbalance} are re-sampling (over-sampling the minority, under-sampling the majority), synthetic sampling, and cost-sensitive learning that weights the loss. This project uses class-weighted cross-entropy (the inverse square root of the class frequency, capped at 10), and over-sampling of laboratory runs during fine-tuning, and reports macro-F1 over the major classes so that classes with one to nine windows do not decide the model comparison.
+
+\section{Automated Mitigation in SDN}
+The OpenFlow protocol gives three tools for mitigation: a \emph{drop} flow entry that discards matching packets; a \emph{meter} that limits the rate of matching packets; and \emph{redirection} to a honeypot or scrubbing device. The survey in \cite{bib:yan} classifies mitigation as source-based (block the attacker), destination-based (protect the victim) and in-network (rate limit and redirect). For spoofed DDoS, source-based blocking is not effective because there are as many sources as packets; destination-based protection is needed. The policy of this project (Table~\ref{tab:policy}) reflects this classification. Published prototypes rarely report measured outcomes of mitigation, such as the fraction of attack traffic removed or the benign traffic lost; this project does.
+
+\section{Critical Summary of the Survey}
+\begin{enumerate}
+	\item Flow statistics from OpenFlow switches are sufficient to detect flooding attacks \cite{bib:braga}, but earlier systems used a handful of features and one attack type.
+	\item Tree ensembles are very strong on tabular intrusion features, which makes it hard for a new model to show large gains; improvements should be measured on type and host decisions and on coordinated attacks, not only on binary detection.
+	\item GNNs have been shown to improve over tabular models when the flow graph is used \cite{bib:egraphsage}, but existing GNN systems classify edges, are evaluated offline and use features that a switch cannot produce.
+	\item Evaluation practices have serious pitfalls: label and flow-construction errors \cite{bib:engelen}, leakage between overlapping windows, and ignorance of domain shift. A system must be tested in the environment where it will run.
+	\item Detection without mitigation does not protect the network; mitigation needs the \emph{attacker identity}, a safe policy and measured outcomes.
+\end{enumerate}
+These points determined the design: a flow- and graph-based detector with an attacker head, OpenFlow-only features, a leakage-free split, and a live mitigation loop that is evaluated by the traffic it stops.
+
+\section{Comparison of Existing Work and Research Gap}
+
+\begin{table}[htbp]
+\centering
+\caption{Comparison of representative works with the proposed system}
+\label{tab:litcompare}
+\small
+\begin{tabularx}{\textwidth}{|p{2.4cm}|X|X|X|X|}
+\hline
+\textbf{Work} & \textbf{Model / unit classified} & \textbf{Features} & \textbf{Names attacker host} & \textbf{Live mitigation} \\ \hline
+Braga \cite{bib:braga} & SOM on flow-table statistics & OpenFlow-derived & No & No \\ \hline
+Tang \cite{bib:tang} & DNN, per flow & Six OpenFlow-obtainable features (NSL-KDD) & No & No \\ \hline
+RF / XGBoost \cite{bib:rf,bib:xgb} & Tree ensembles, per flow & CICFlowMeter statistics & No & No \\ \hline
+Kitsune \cite{bib:kitsune} & Autoencoder ensemble, per packet & Packet statistics & No & No \\ \hline
+E-GraphSAGE \cite{bib:egraphsage} & GNN, per edge (flow) & NetFlow / CICFlowMeter & Indirectly (edge) & No \\ \hline
+Anomal-E \cite{bib:anomale} & Self-supervised GNN, per edge & NetFlow & Indirectly (edge) & No \\ \hline
+\textbf{This project} & Multi-task GAT: window attack type and per-host attacker score & 16 edge and 16 node features from OpenFlow counters; selected subset & \textbf{Yes} (node head) & \textbf{Yes} (os-ken, OVS drop / meter rules) \\ \hline
+\end{tabularx}
+\end{table}
+
+From this survey the following gaps are identified:
+\begin{enumerate}
+	\item Graph-based detectors classify flows or edges, but mitigation needs to know \emph{which host} to block; a per-host attacker head is missing.
+	\item Most GNN and deep-learning IDS models use features that an OpenFlow switch cannot report, so the trained models cannot be deployed on the SDN they are evaluated for.
+	\item Detection is rarely connected to an actual controller; the time to mitigate, the fraction of attack traffic dropped and the collateral damage to benign hosts are not measured.
+	\item Evaluation is often affected by window overlap, wrong direction labels and the absence of real topology, which inflates the reported scores.
+\end{enumerate}
+The proposed system addresses these gaps with a multi-task GAT on OpenFlow-compatible host graphs, a leakage-free evaluation, and an end-to-end live mitigation loop with measured outcomes.

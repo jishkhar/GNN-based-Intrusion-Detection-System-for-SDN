@@ -40,6 +40,19 @@ const yScale = (max = 1) => ({
   ticks: { callback: pctTicks, color: C.muted },
   grid: { color: C.border },
 });
+// Zoomed y-axis: starts just below the lowest value so differences near 100% are visible.
+const zoomScale = (...series) => {
+  const vals = series.flat().filter(Number.isFinite);
+  const lo = Math.min(...vals);
+  // Start at 98%; only go lower if a value would otherwise be cut off.
+  const min = lo >= 0.98 ? 0.98 : Math.max(0, Math.floor((lo - 0.01) * 100) / 100);
+  return {
+    min, max: 1,
+    ticks: { callback: v => (v * 100).toFixed(2) + '%', color: C.muted },
+    grid: { color: C.border },
+    title: { display: true, text: 'axis zoomed', color: C.muted, font: { size: 10 } },
+  };
+};
 const xScale = () => ({ ticks: { color: C.muted }, grid: { color: C.border } });
 
 // ── Init ───────────────────────────────────────────────────────────────────
@@ -183,7 +196,7 @@ function chartTestMetrics() {
       labels: ['Accuracy','Precision','Recall','F1 Score'],
       datasets: [barDataset('Test Metrics', [t.accuracy, t.precision, t.recall, t.f1], [C.blue, C.green, C.amber, C.red])],
     },
-    options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: yScale(), x: xScale() } },
+    options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: zoomScale([t.accuracy, t.precision, t.recall, t.f1]), x: xScale() } },
   });
 }
 
@@ -198,7 +211,7 @@ function chartThreshold() {
         barDataset('Argmax (0.5)',            [a.accuracy, a.precision, a.recall, a.f1], C.muted),
       ],
     },
-    options: { responsive: true, scales: { y: yScale(), x: xScale() } },
+    options: { responsive: true, scales: { y: zoomScale([t.accuracy, t.precision, t.recall, t.f1, a.accuracy, a.precision, a.recall, a.f1]), x: xScale() } },
   });
 }
 
@@ -250,7 +263,7 @@ function chartLineHistory(id, label, accessor, color) {
       labels: epochs,
       datasets: [{ label, data: gnnMetrics.history.map(accessor), borderColor: color, backgroundColor: color + '14', borderWidth: 2, tension: 0.3, fill: true, pointRadius: 0 }],
     },
-    options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: yScale(), x: xScale() } },
+    options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: zoomScale(gnnMetrics.history.map(accessor)), x: xScale() } },
   });
 }
 
@@ -265,7 +278,7 @@ function chartPrecisionRecall() {
         { label: 'Recall',    data: gnnMetrics.history.map(h => h.threshold_tuned.recall),    borderColor: C.amber, borderWidth: 2, tension: 0.3, fill: false, pointRadius: 0 },
       ],
     },
-    options: { responsive: true, scales: { y: yScale(), x: xScale() } },
+    options: { responsive: true, scales: { y: zoomScale(gnnMetrics.history.map(h => h.threshold_tuned.precision), gnnMetrics.history.map(h => h.threshold_tuned.recall)), x: xScale() } },
   });
 }
 
@@ -282,19 +295,20 @@ function chartBarComparison(id, label, accessor) {
     options: {
       responsive: true,
       plugins: { legend: { display: false } },
-      scales: { y: yScale(), x: xScale() },
+      scales: { y: zoomScale([gnn, rf, xgb]), x: xScale() },
     },
   });
 }
 
 function chartRocAuc() {
+  const rocVals = [0.9999, baselineMetrics.random_forest.roc_auc, baselineMetrics.xgboost.roc_auc];
   new Chart(document.getElementById('rocAucComparisonChart'), {
     type: 'bar',
     data: {
       labels: ['GNN','Random Forest','XGBoost'],
-      datasets: [barDataset('ROC-AUC', [0.9999, baselineMetrics.random_forest.roc_auc, baselineMetrics.xgboost.roc_auc], [C.accent, C.muted, C.muted])],
+      datasets: [barDataset('ROC-AUC', rocVals, [C.accent, C.muted, C.muted])],
     },
-    options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: yScale(), x: xScale() } },
+    options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: zoomScale(rocVals), x: xScale() } },
   });
 }
 
@@ -329,7 +343,7 @@ function chartRadar() {
     },
     options: {
       responsive: true,
-      scales: { r: { beginAtZero: true, max: 1, ticks: { callback: v => (v*100).toFixed(0)+'%', backdropColor: 'transparent', color: C.muted }, grid: { color: C.border }, angleLines: { color: C.border }, pointLabels: { color: C.muted } } },
+      scales: { r: { min: (() => { const lo = Math.min(c0.precision, c0.recall, c0['f1-score'], c1.precision, c1.recall, c1['f1-score']); return lo >= 0.98 ? 0.98 : Math.max(0, Math.floor((lo - 0.01) * 100) / 100); })(), max: 1, ticks: { callback: v => (v*100).toFixed(1)+'%', backdropColor: 'transparent', color: C.muted }, grid: { color: C.border }, angleLines: { color: C.border }, pointLabels: { color: C.muted } } },
       plugins: { legend: { position: 'bottom', labels: { color: C.muted } } },
     },
   });
@@ -346,7 +360,7 @@ function chartMacroWeighted() {
         barDataset('Weighted Avg', [wa.precision, wa.recall, wa['f1-score']], C.purple),
       ],
     },
-    options: { responsive: true, scales: { y: yScale(), x: xScale() } },
+    options: { responsive: true, scales: { y: zoomScale([ma.precision, ma.recall, ma['f1-score'], wa.precision, wa.recall, wa['f1-score']]), x: xScale() } },
   });
 }
 

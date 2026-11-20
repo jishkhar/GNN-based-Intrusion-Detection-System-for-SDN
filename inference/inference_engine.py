@@ -54,6 +54,10 @@ class InferenceEngine:
         self.node_std = torch.tensor(stats["node_std"], device=self.device)
         self.edge_mean = torch.tensor(stats["edge_mean"], device=self.device)
         self.edge_std = torch.tensor(stats["edge_std"], device=self.device)
+        # Column subset the model was trained on (None = all features).
+        sel = self.bundle.get("feature_selection") or {}
+        self.node_cols = np.asarray(sel["node"], dtype=np.int64) if sel.get("node") is not None else None
+        self.edge_cols = np.asarray(sel["edge"], dtype=np.int64) if sel.get("edge") is not None else None
         self.classes: list[str] = self.bundle["classes"]
         self.benign_index = self.classes.index("Benign")
         self.window_threshold = float(self.bundle["thresholds"]["window"])
@@ -94,6 +98,10 @@ class InferenceEngine:
         src, dst, ips = factorize_nodes(records)
         x = node_features(records, src, dst, len(ips))
         e = edge_features(records)
+        if self.node_cols is not None:
+            x = x[:, self.node_cols]
+        if self.edge_cols is not None:
+            e = e[:, self.edge_cols]
         return x, np.stack([src, dst]), e, ips
 
     @torch.no_grad()

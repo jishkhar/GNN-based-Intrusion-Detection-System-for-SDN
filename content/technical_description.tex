@@ -1,0 +1,997 @@
+%%  Technical Chapters
+
+\chapter{System Overview and Requirements}
+
+This chapter gives an overview of the proposed intrusion detection and mitigation system, formulates the problem mathematically, lists the concepts and tools that the solution relies on, and states the functional and non-functional requirements against which the design (Chapters 4 and 5) and the results (Chapter 6) are traced.\\
+
+\section{System Overview and Block Diagram}
+
+The system observes the flow tables of the OpenFlow switches in an SDN, converts the observations of every ten-second window into a host-to-host graph, applies a graph neural network to the graph, and returns blocking rules to the controller. Figure~\ref{fig:blockdiagram} shows the main blocks. The traffic enters at the left; the controller periodically polls the switches for flow statistics (every 2~s) and sends them to the IDS service. The service builds the graph, runs the GNN and the alert classifier, and the mitigation engine puts the resulting OpenFlow actions in the \emph{response} to the same request, so no additional message is needed. The controller installs these rules on the switches. The dashboard reads the state of the IDS service.
+
+\begin{figure}[htbp]
+\centering
+\scriptsize
+\begin{verbatim}
+ Hosts h1..h6 --- Open vSwitch s1, s2 (OpenFlow 1.3) <----- flow-mod, meter-mod
+                         |  flow-stats every 2 s               ^
+                         v                                      | rules (drop / rate-limit)
+                +------------------+   POST /api/flows   +------------------------------+
+                |  os-ken          | ------------------> |  IDS service (FastAPI)       |
+                |  controller      | <------------------ |  Flow collector (10 s window)|
+                |  (ids_controller)|   mitigation actions|  Feature + graph builder     |
+                +------------------+                     |  GNN inference (TorchScript) |
+                                                         |  Alert classifier            |
+                                                         |  Mitigation engine + audit   |
+                                                         +--------------+---------------+
+                                                                        | REST / SSE
+                                                                        v
+                                                         Web dashboard (/, /live, /pipeline)
+\end{verbatim}
+\caption{Block diagram of the GNN-based IDS for SDN}
+\label{fig:blockdiagram}
+\end{figure}
+
+The work has two parts that share the same feature definitions. The \textbf{offline part} builds graphs from the InSDN dataset, trains the baselines and the GNN and exports the model. The \textbf{online part} (the live IDS) applies the exported model to the statistics of a running network and enforces the decision.
+
+\section{Problem Formulation}
+
+Let the traffic observed in a time window $t$ be a set of unidirectional flow records $F_t=\{f_1,\dots,f_m\}$, where each record $f_i$ has a source host, a destination host, a protocol, ports, and the counters \texttt{packets}, \texttt{bytes} and \texttt{duration} reported by OpenFlow. The window is represented as a directed graph
+\begin{equation}
+G_t=(V_t,E_t,X_t,A_t),\qquad V_t=\{\text{hosts in } F_t\},\; E_t\subseteq V_t\times V_t
+\label{eq:graph}
+\end{equation}
+where $X_t\in\mathbb{R}^{|V_t|\times d_v}$ is the matrix of node features and $A_t\in\mathbb{R}^{|E_t|\times d_e}$ the matrix of edge features ($d_v=d_e=16$ before feature selection). The model $\mathcal{M}$ is a function that returns, for each window, an attack class and for each host an attacker probability:
+\begin{equation}
+\mathcal{M}(G_t)=\big(\hat{y}_t,\;\{\hat{p}_v\}_{v\in V_t}\big),\qquad \hat{y}_t\in\{\text{Benign, DDoS, DoS, Probe, BruteForce, WebAttack, Botnet, Other}\},\;\hat{p}_v\in[0,1].
+\label{eq:model}
+\end{equation}
+The \emph{window label} $y_t$ is the most frequent attack class if at least $\tau=10\%$ of the initiator-direction flow records are attacks, and Benign otherwise. The \emph{host label} is $y_v=1$ if host $v$ initiated at least one attack flow in the window, and $0$ for victims and benign hosts. The binary attack score of a window is the probability mass on all attack classes,
+\begin{equation}
+s_t = 1-P(\text{Benign}\mid G_t),
+\label{eq:score}
+\end{equation}
+and the decision rule is ATTACK if $s_t\ge\theta_a$ ($=0.85$ in the live system), SUSPICIOUS if $0.5\le s_t<\theta_a$, and BENIGN otherwise. Hosts with $\hat{p}_v\ge\theta_n$ (the node threshold tuned on the validation split) are the attackers. The goal is to maximise the detection quality, measured by the window and host F1-scores, subject to: false-positive rate $<5\%$, inference latency $<50$~ms and at least $70\%$ of the attack traffic dropped after mitigation.
+
+
+\section{Assumptions and Constraints}
+\begin{itemize}
+	\item The switches support OpenFlow 1.3 with flow statistics; meters are used for rate limiting if available (otherwise a drop fallback is configurable).
+	\item The controller can reach the IDS service over HTTP; the IDS can be on the same machine or on another host.
+	\item The only observations are flow-table statistics. Packet payloads, TCP flags and inter-arrival times are not available, because the switch does not report them.
+	\item Source addresses may be spoofed; the system must not assume that an IP address identifies a single real host during a DDoS.
+	\item The topology is small (two switches, six hosts) in the laboratory; the design does not depend on it, but the evaluation does.
+	\item Infrastructure addresses (controller, gateway, DNS) are known to the operator and are put in the whitelist.
+\end{itemize}
+
+\section{OpenFlow Primer: What the Switch Reports}
+Table~\ref{tab:ofprimer} lists the information of a flow entry and how each part is used. The key point is that every feature of the model must be derived from the first group of rows; this is the reason for the feature restriction of Chapter~4.
+
+\begin{table}[htbp]
+\centering
+\caption{Fields of an OpenFlow flow entry and their use in this project}
+\label{tab:ofprimer}
+\small
+\begin{tabularx}{\textwidth}{|p{3.2cm}|X|p{3.6cm}|}
+\hline
+\textbf{Field} & \textbf{Meaning} & \textbf{Use} \\ \hline
+Match: \texttt{ipv4\_src}, \texttt{ipv4\_dst}, \texttt{ip\_proto}, \texttt{tcp/udp\_src}, \texttt{tcp/udp\_dst} & The 5-tuple that identifies the flow & Nodes, edges, protocol and port features \\ \hline
+\texttt{packet\_count}, \texttt{byte\_count} & Cumulative counters of the entry & Packets, bytes, rates, mean packet size \\ \hline
+\texttt{duration\_sec}, \texttt{duration\_nsec} & Time since the entry was installed & Duration, rates, activity test \\ \hline
+Priority & Order of matching among entries & Severity of IDS rules (65535 to 65335) \\ \hline
+Idle and hard timeout & Removal after inactivity or after a fixed time & Automatic expiry of IDS rules \\ \hline
+Cookie & Opaque 64-bit tag chosen by the controller & Identifies IDS rules for deletion and keeps them out of the statistics \\ \hline
+Instructions & Actions of the entry (output, drop, \texttt{goto\_table}, \texttt{meter}) & Forwarding (table 1), drop and meter (table 0) \\ \hline
+Meter (band: drop at $r$ packets/s) & Rate limiter referenced by entries & Scanner and victim rate limits \\ \hline
+\end{tabularx}
+\end{table}
+
+\section{Attack Models Used in the Laboratory}
+The four attacks generated in the laboratory are chosen to cover the three mitigation styles (drop the source, rate-limit the source, protect the victim):
+\begin{itemize}
+	\item \textbf{DDoS:} an hping3 SYN flood against the web server (port 80) with random spoofed source addresses, from both attacker hosts. Every packet may create a new flow entry, so the switch sees thousands of one-packet flows.
+	\item \textbf{DoS:} the same SYN flood from one real source address.
+	\item \textbf{Probe:} repeated nmap SYN scans of ports 1 to 2000 of the victim.
+	\item \textbf{BruteForce:} repeated HTTP login requests with random passwords to a service port on the victim.
+\end{itemize}
+Benign background traffic (periodic HTTP requests from clients, an iperf3 stream and a ping stream) runs throughout, so every attack has to be separated from busy benign hosts.
+
+\section{Threat Model}
+The \emph{attacker} is a host inside or outside the network that can send arbitrary packets to the servers, with or without spoofed addresses, but cannot modify the switches or the controller. The \emph{defender} controls the controller, the IDS and the switch configuration. The IDS must be robust against three failure modes: (i) false positives that block legitimate users, (ii) denial of service against the IDS itself, handled by bounding the flow state to 50,000 flows, chunking the windows and fail-open forwarding, and (iii) unauthorised use of the management API, handled by an API key on every mutating call. Attacks that aim to evade the model, poison the training data, or attack the controller--switch channel are outside the threat model and are listed as future work.
+
+\section{Concepts and Technologies Used}
+
+\begin{table}[htbp]
+\centering
+\caption{Essential concepts and why they are needed}
+\label{tab:concepts}
+\small
+\begin{tabularx}{\textwidth}{|p{3.3cm}|X|}
+\hline
+\textbf{Concept} & \textbf{Use in the project} \\ \hline
+Software-Defined Networking, OpenFlow 1.3 & Flow tables, match fields, flow statistics (packet and byte counters, duration), flow-mod and meter-mod messages for enforcement; two-table pipeline. \\ \hline
+Graph theory & Hosts as nodes and flows as edges; in-degree, out-degree (fan-in, fan-out); star, one-to-many and one-to-one traffic structures that characterise DDoS, Probe and DoS. \\ \hline
+Information theory & Shannon entropy of the destination-port distribution of a host as a scanning indicator. \\ \hline
+Statistics and probability & Log-transform and z-score normalisation, class-imbalance weights, threshold selection on validation data, ROC-AUC, F1, false-positive rate. \\ \hline
+Graph neural networks & Message passing, attention (GAT), comparison with GCN and GraphSAGE; graph-level read-out and node-level classification (multi-task learning). \\ \hline
+Classical machine learning & Random Forest and XGBoost baselines; ANOVA, mutual information, L1 logistic regression, RFE, PCA, SVD and ICA for feature selection and reduction. \\ \hline
+Computer networks & TCP/UDP/ICMP behaviour, SYN floods, port scans, spoofed sources, rate limiting with OpenFlow meters, controller--switch communication. \\ \hline
+Software engineering & Modular design, REST APIs, unit testing (pytest), configuration files, containerisation (Docker), logging and audit trails. \\ \hline
+Project management & Thirty-week plan with milestones, task allocation and a resource and cost estimate (Appendix A). \\ \hline
+\end{tabularx}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Tools selected and the justification}
+\label{tab:tools}
+\small
+\begin{tabularx}{\textwidth}{|p{3.2cm}|X|}
+\hline
+\textbf{Tool} & \textbf{Justification} \\ \hline
+PyTorch, PyTorch Geometric & Standard, well-documented GNN stack with GAT/GCN/SAGE layers and graph batching; models can be exported with TorchScript for inference without the training code. \\ \hline
+scikit-learn, XGBoost & Reference implementations of the baselines and of the feature-selection methods. \\ \hline
+os-ken & Maintained fork of Ryu with the same OpenFlow API; Ryu itself is unmaintained and does not install on current Python versions. \\ \hline
+Mininet and Open vSwitch & Realistic OpenFlow 1.3 behaviour including meters, on a single machine, with scripted attacks and no physical hardware. \\ \hline
+hping3, nmap, iperf3 & Generate SYN floods and spoofed floods, port scans, and benign bulk traffic in the laboratory. \\ \hline
+FastAPI and Uvicorn & Lightweight asynchronous REST service for the IDS, server-sent events for the live dashboard. \\ \hline
+Docker & The laboratory needs root privileges and specific kernel modules; a privileged container isolates it from the host operating system. \\ \hline
+\end{tabularx}
+\end{table}
+
+\section{Requirements}
+\subsection{Functional Requirements}
+
+\begin{longtable}{|p{1.3cm}|p{12.5cm}|}
+\caption{Functional requirements}\label{tab:fr}\\
+\hline
+\textbf{ID} & \textbf{Requirement} \\ \hline
+\endfirsthead
+\hline \textbf{ID} & \textbf{Requirement} \\ \hline
+\endhead
+FR1 & The system shall clean the raw dataset files, map dataset labels to the eight canonical classes and treat unknown labels as ``Other'' and never as Benign. \\ \hline
+FR2 & The system shall compute edge and node features only from fields available in OpenFlow flow statistics, using one module shared by the dataset pipeline and the live collector. \\ \hline
+FR3 & The system shall convert flow records into host-to-host graph windows, and split the windows chronologically into training, validation and test sets with no shared flows. \\ \hline
+FR4 & The system shall train a multi-task GNN that predicts the attack type of a window and an attacker probability for every host, and shall train Random Forest and XGBoost baselines on identical splits. \\ \hline
+FR5 & The system shall report window-level, attack-type and host-level metrics (F1, precision, recall, FPR, ROC-AUC, per-class F1) and provide ablation and feature-selection comparisons. \\ \hline
+FR6 & The system shall export the trained model as a single TorchScript bundle that contains the weights, normalisation statistics, class names, thresholds and feature names. \\ \hline
+FR7 & The controller shall poll flow statistics from all switches at a configurable interval (default 2 s) and send them to the IDS service. \\ \hline
+FR8 & The IDS service shall maintain a sliding window of active flows (default 10 s), classify it, and return the decision with the mitigation actions in the response. \\ \hline
+FR9 & The mitigation engine shall apply a policy per attack type (drop, rate-limit, isolate), never block whitelisted hosts, require confirmation over consecutive windows, and expire rules automatically. \\ \hline
+FR10 & The controller shall install and delete the rules on the switches, track them per switch and keep forwarding if the IDS is unreachable. \\ \hline
+FR11 & The system shall write an audit log of every mitigation action and every suspicious decision. \\ \hline
+FR12 & The dashboard shall show offline results, the live traffic graph, alerts, active rules, latency, and allow manual block and unblock protected by an API key. \\ \hline
+FR13 & The laboratory shall generate labelled benign and attack traffic (DDoS, DoS, Probe, BruteForce) with recorded ground truth and measure time to mitigation, attack-traffic drop rate and false blocks. \\ \hline
+\end{longtable}
+
+\textbf{Use case diagram.} Figure~\ref{fig:usecase} shows the actors and use cases. The \emph{Network Administrator} monitors the network, inspects alerts and can override the automatic decisions. The \emph{SDN Controller} is a system actor that supplies the flow statistics and enforces the rules. The \emph{ML Engineer} (developer) prepares data, trains and exports models.
+
+\begin{figure}[htbp]
+\centering
+\scriptsize
+\begin{verbatim}
+  +-------------------------------- GNN-IDS for SDN ----------------------------------+
+  |                                                                                    |
+  |  (UC1 View offline results & comparisons) <-------------+                          |
+  |  (UC2 Monitor live traffic graph)         <-------------+---- Network Administrator|
+  |  (UC3 Inspect alerts and audit log)       <-------------+                          |
+  |  (UC4 Manually block / unblock host)      <-------------+                          |
+  |                                                                                    |
+  |  (UC5 Submit flow statistics)  <<include>> (UC6 Build graph & classify window)     |
+  |        ^                                          |  <<include>>                   |
+  |        |                                          v                                |
+  |   SDN Controller (os-ken) ----- (UC8 Install / remove rules) <-- (UC7 Decide       |
+  |                                                                   mitigation)      |
+  |  (UC9 Prepare data & build graphs)                                                 |
+  |  (UC10 Train, compare and export model) <------------------------- ML Engineer     |
+  |  (UC11 Run attack scenarios in lab) <--------------------------- ML Engineer       |
+  +------------------------------------------------------------------------------------+
+\end{verbatim}
+\caption{Use case diagram}
+\label{fig:usecase}
+\end{figure}
+
+
+\subsection{Use Case Specifications}
+\begin{longtable}{|p{3.0cm}|p{11.0cm}|}
+\caption{Specification of the main use cases}\label{tab:ucspec}\\
+\hline
+\endfirsthead
+\hline
+\endhead
+\textbf{UC6 -- Build graph and classify window} & \textbf{Actor:} IDS service. \textbf{Pre-condition:} flow statistics have been received and a model bundle is loaded. \textbf{Main flow:} (1) the collector returns the flows active in the last 10~s; (2) the engine computes features and splits the window into chunks of at most 200 records; (3) the model is run on all chunks as one batch; (4) the engine returns the window class, confidence, per-host scores and the likely victims. \textbf{Alternative flows:} an empty window gives Benign with confidence 0; a large window gives more chunks. \textbf{Post-condition:} a prediction object with the latency of each stage. \\ \hline
+\textbf{UC7 -- Decide mitigation} & \textbf{Actor:} alert classifier and mitigation engine. \textbf{Pre-condition:} a prediction exists. \textbf{Main flow:} (1) the level is determined from the confidence; (2) hosts above the node threshold are listed and whitelisted hosts are removed; (3) streak counters are updated; (4) hosts confirmed in two consecutive windows and outside the cool-down become new attackers; (5) the policy of Table~\ref{tab:policy} yields rule actions. \textbf{Alternative flows:} SUSPICIOUS windows are only logged; a duplicate rule is skipped. \textbf{Post-condition:} actions are in the outbox and in the audit log. \\ \hline
+\textbf{UC4 -- Manual block / unblock} & \textbf{Actor:} network administrator. \textbf{Pre-condition:} the API key is known. \textbf{Main flow:} the administrator enters an IP address on the live page; the call is authenticated; the mitigation engine creates (or deletes) a rule with the reason ``manual''; the controller applies it at the next poll. \textbf{Alternative flows:} a wrong key gives HTTP 401 and nothing changes. \textbf{Post-condition:} the rule list and the audit log show the action. \\ \hline
+\textbf{UC8 -- Install / remove rules} & \textbf{Actor:} SDN controller. \textbf{Main flow:} for each action in the response, the controller sends a flow-mod (and a meter-mod for rate limits) to every switch, stores the cookie per switch, and on a flow-removed message reports it so that the engine knows when all copies are gone. \textbf{Alternative flow:} if the switch has no meters and \texttt{--rate-limit-as-drop} is set, the rate limit becomes a drop. \\ \hline
+\end{longtable}
+
+\subsection{Non-functional Requirements}
+
+\begin{longtable}{|p{1.3cm}|p{3cm}|p{9.5cm}|}
+\caption{Non-functional requirements}\label{tab:nfr}\\
+\hline
+\textbf{ID} & \textbf{Category} & \textbf{Requirement} \\ \hline
+\endfirsthead
+\hline \textbf{ID} & \textbf{Category} & \textbf{Requirement} \\ \hline
+\endhead
+NFR1 & Performance & Model inference plus graph construction shall take less than 50~ms per window; the complete service path shall be below this on a laptop CPU. \\ \hline
+NFR2 & Accuracy & False-positive rate of benign windows shall be below 5\%; windows and hosts shall be detected with F1 above 0.95 on the held-out time-ordered test split. \\ \hline
+NFR3 & Effectiveness & At least 70\% of the attack traffic shall be dropped after mitigation in the live laboratory, without blocking benign hosts. \\ \hline
+NFR4 & Reliability and safety & The network shall keep forwarding if the IDS is down (fail-open). Whitelisted infrastructure shall never be blocked. Rules shall expire (60~s idle, 300~s hard). \\ \hline
+NFR5 & Security & Mutating API calls (flow upload, manual block/unblock) shall require an API key; the audit log shall not be modifiable through the API. \\ \hline
+NFR6 & Reproducibility & All scripts shall read one YAML configuration, use a fixed random seed and record the git commit and parameters in every result file; dependencies shall be pinned. \\ \hline
+NFR7 & Portability & The live laboratory shall run in a Docker container, with the IDS on the host or on another machine reachable over HTTP. \\ \hline
+NFR8 & Maintainability & Feature definitions shall exist in one module; components shall be separately testable with an automated pytest suite. \\ \hline
+NFR9 & Scalability & Large windows shall be split into fixed-size chunks (200 records) so the latency grows roughly linearly with the number of flows. \\ \hline
+NFR10 & Usability & The dashboard shall show the pipeline progress, the live state and the results without using the command line. \\ \hline
+\end{longtable}
+
+
+%% new chapter
+
+\chapter{System Architecture and High Level Design}
+
+This chapter describes the components of the system, the data pipeline that feeds the model, the model itself, the integration with the SDN and the mitigation policy. Terminology: a \emph{flow record} is one unidirectional flow entry; a \emph{window} is the set of flow records of a time interval; a \emph{chunk} is a part of a live window with at most 200 records that is given to the model as one graph; \emph{ATTACK}, \emph{SUSPICIOUS} and \emph{BENIGN} are the three alert levels.\\
+
+\section{Layered Architecture}
+
+\begin{figure}[htbp]
+\centering
+\scriptsize
+\begin{verbatim}
+ +---------------- Presentation ----------------+   web/static: index, live, pipeline (JS)
+ |  Offline results | Live monitor | Pipeline   |   web/app.py: REST + SSE
+ +----------------------+------------------------+
+ +---------------- Decision layer ---------------+   inference/classifier.py
+ |  Alert classifier  ->  Mitigation engine      |   mitigation/mitigation_engine.py
+ +----------------------+------------------------+
+ +---------------- Intelligence layer -----------+   preprocessing/openflow_features.py
+ |  Feature builder -> Graph builder -> GAT      |   preprocessing/graph_builder_v2.py
+ |  (TorchScript bundle, normalisation, thresholds)|  models/gnn_v2.py, inference/inference_engine.py
+ +----------------------+------------------------+
+ +---------------- Control layer ----------------+   controller/ids_controller.py
+ |  os-ken app: stats poller, rule installer     |   controller/flow_collector.py
+ +----------------------+------------------------+
+ +---------------- Data plane -------------------+   topology/sdn_topology.py
+ |  Open vSwitch s1, s2 + hosts (Mininet)        |   docker/Dockerfile.sdn-lab
+ +-----------------------------------------------+
+\end{verbatim}
+\caption{Layered architecture and the modules implementing each layer}
+\label{fig:layers}
+\end{figure}
+
+\section{Flow Collector (Controller Side)}
+\subsection{More Details}
+The os-ken application \texttt{IDSController} performs two jobs. First, it implements forwarding: table~1 contains forwarding entries that match the IP 5-tuple (source and destination address, protocol and ports), so that every flow has its own entry and therefore its own counters. A conventional MAC-learning switch has one entry per MAC pair and would give no per-flow or per-port statistics. Second, a monitoring thread sends an OpenFlow \texttt{FlowStatsRequest} to every switch every two seconds, converts the replies to dictionaries and posts them to the IDS service. The statistics counters are cumulative; the controller sends the latest values and the service uses the change between polls only to decide whether a flow is still active. On the service side, \texttt{FlowCollector} keeps a bounded state table (at most 50,000 flows) and returns the flows active within the last $W=10$~s as a data frame.
+
+\section{Feature Builder}
+Feature definitions are in one module, \texttt{openflow\_features.py}, which is used by both the dataset converter and the live collector. Datasets provide bidirectional CICFlowMeter rows, which are split into a forward and, if there are backward packets, a reverse record, so that they look like the two flow entries an OpenFlow switch would hold. Byte counts are converted to whole Ethernet frames by adding a header size to each packet (54~B for TCP, 42~B for UDP and other protocols) so that dataset and switch counters mean the same thing.
+
+\begin{table}[htbp]
+\centering
+\caption{Edge features (per flow record)}
+\label{tab:edgefeat}
+\small
+\begin{tabularx}{\textwidth}{|c|l|X|}
+\hline
+\textbf{\#} & \textbf{Name} & \textbf{Definition} \\ \hline
+1--3 & packets, bytes, duration & OpenFlow counters; duration $=$ duration\_sec $+$ duration\_nsec$/10^9$ \\ \hline
+4--5 & pkt\_rate, byte\_rate & packets (bytes) divided by max(duration, 1~ms) \\ \hline
+6 & mean\_pkt\_size & bytes / packets \\ \hline
+7--10 & proto\_tcp, udp, icmp, other & protocol one-hot \\ \hline
+11--13 & dport\_well\_known, registered, ephemeral & destination port bucket ($<1024$, $1024$--$49151$, $\ge 49152$) \\ \hline
+14--16 & sport\_well\_known, registered, ephemeral & source port bucket \\ \hline
+\end{tabularx}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Node features (per host per window)}
+\label{tab:nodefeat}
+\small
+\begin{tabularx}{\textwidth}{|c|l|X|}
+\hline
+\textbf{\#} & \textbf{Name} & \textbf{Definition} \\ \hline
+1--2 & out\_flows, in\_flows & flow records sent and received \\ \hline
+3--6 & out/in\_packets, out/in\_bytes & packets and bytes sent and received \\ \hline
+7--8 & out\_degree, in\_degree & distinct destination (source) hosts: fan-out (fan-in) \\ \hline
+9 & unique\_dst\_ports & distinct destination ports contacted \\ \hline
+10 & dst\_port\_entropy & Shannon entropy of the destination-port distribution, Eq.~\ref{eq:entropy} \\ \hline
+11 & unique\_src\_ports\_in & distinct source ports of incoming flows \\ \hline
+12 & mean\_out\_duration & mean duration of outgoing flows \\ \hline
+13--16 & out\_tcp/udp/icmp/other\_frac & protocol mix of outgoing flows \\ \hline
+\end{tabularx}
+\end{table}
+
+The port entropy of host $v$ with destination-port frequencies $q_{v,p}$ is
+\begin{equation}
+H_v=-\sum_{p} q_{v,p}\log_2 q_{v,p},
+\label{eq:entropy}
+\end{equation}
+which is large for a scanner that touches many ports once and close to zero for a client that talks to one service. Because bytes range over eight orders of magnitude, every feature $x$ is transformed to $\operatorname{sign}(x)\log(1+|x|)$ and then standardised with the mean and standard deviation of the \textbf{training split only},
+\begin{equation}
+\tilde{x}=\frac{\operatorname{sign}(x)\log(1+|x|)-\mu_{\text{train}}}{\sigma_{\text{train}}}.
+\label{eq:norm}
+\end{equation}
+
+\section{Dynamic Graph Builder}
+Offline, a window consists of 100 consecutive flows in capture order with a stride of 25 (10 for the benign file to balance the classes), because most InSDN timestamps have only minute resolution and time-based windows would give very few graphs. Live, a window consists of all flows active in the last 10~s. Nodes are IP addresses, edges are flow records, and window and host labels follow the rules of Section~3.2. Three construction details were found necessary:
+\begin{itemize}
+	\item \textbf{Direction normalisation.} CICFlowMeter treats the side it sees first as the forward side, and in InSDN a large share of flows therefore run from the victim to the attacker (27\% of the metasploitable-2 rows, 5\% of the OVS rows, 20\% of the benign rows). The side with the lower port number is taken as the server, and flows leaving the server are marked as responses, so that victims are not labelled as attackers.
+	\item \textbf{Benign overlay.} InSDN benign and attack traffic come from different captures, so raw windows are pure. For half of the attack windows a benign window of the \emph{same split} is merged in, so that the model must find the attackers among normal hosts.
+	\item \textbf{Time-ordered split with a gap.} Each (file, class) stream is split chronologically into 70\% training, 15\% validation and 15\% test windows with a gap that guarantees no flow is shared between splits.
+\end{itemize}
+
+\section{Feature Selection and Dimensionality Reduction}
+Eight methods are compared on both tables (edge and node features) with a fast Random-Forest probe: ANOVA F-test, mutual information, RF importance, L1 logistic regression and recursive feature elimination (selection); PCA, truncated SVD and FastICA (reduction); and the full feature set as the baseline. Each method is evaluated at $k\in\{4,6,8,10,12\}$ features, and the smallest $k$ whose validation F1 is within a tolerance of the best is chosen. Only \emph{selection} methods are applied to the model, because reduced features are linear combinations that the live controller would also have to compute and that cannot be traced back to named OpenFlow fields.
+
+\section{GNN Inference Engine and Model}
+
+\begin{figure}[htbp]
+\centering
+\scriptsize
+\begin{verbatim}
+ node features x (N x d_v) --> node MLP ---------------+
+ edge features A (E x d_e) + direction flag --> edge MLP --> mean of out-edges, mean of in-edges
+                                                        |                 |
+                                                        +-> concat -> Linear -> h0 (N x 64)
+ edges (u->v) and reversed copies (v->u, flag = 1)  ----+
+                                                        v
+   Layer l = 1,2:  h <- LayerNorm( h + ELU( GAT(h, edges, edge embedding; 4 heads x 16) ) ), dropout 0.2
+                                                        |
+              +-----------------------------------------+------------------------------+
+              v                                                                         v
+   Node head: [h || h0] -> MLP -> 2 logits           Graph head: [mean(h) || max(h) || mean(E) || max(E)]
+   (attacker / not attacker, per host)                           -> MLP -> 8 logits (attack type)
+\end{verbatim}
+\caption{Architecture of the multi-task GAT}
+\label{fig:gnn}
+\end{figure}
+
+Figure~\ref{fig:gnn} shows the model (class \texttt{MultiTaskGNN}). Important choices are:
+\begin{itemize}
+	\item \textbf{Bidirectional message passing.} Traffic is directed, but a pure attacker (for example a spoofed DDoS source) has no incoming edges and would never receive information from the victim. Reversed copies of all edges are therefore added, with a direction flag appended to their features.
+	\item \textbf{Attention with edge features.} The GAT layer computes, for node $i$ and neighbour $j$ with edge embedding $e_{ij}$,
+	\begin{equation}
+	\alpha_{ij}=\frac{\exp\!\big(\mathrm{LeakyReLU}(\mathbf{a}^{\top}[W h_i\,\|\,W h_j\,\|\,W_e e_{ij}])\big)}{\sum_{k\in\mathcal{N}(i)}\exp\!\big(\mathrm{LeakyReLU}(\mathbf{a}^{\top}[W h_i\,\|\,W h_k\,\|\,W_e e_{ik}])\big)},\qquad
+	h_i'=\sum_{j\in\mathcal{N}(i)}\alpha_{ij}W h_j,
+	\label{eq:gat}
+	\end{equation}
+	with four heads whose outputs are concatenated (4 heads $\times$ 16 dimensions $=$ 64).
+	\item \textbf{Multi-task loss.} The graph head gives the attack type (8 classes) and the node head the attacker probability. The training loss is
+	\begin{equation}
+	\mathcal{L}=\alpha\,\mathcal{L}_{\text{node}}+(1-\alpha)\,\mathcal{L}_{\text{graph}},\qquad \alpha=0.5,
+	\label{eq:loss}
+	\end{equation}
+	where both terms are class-weighted cross-entropies with weights proportional to the inverse square root of the class frequency, capped at 10.
+	\item \textbf{Thresholds.} Window and node thresholds are selected on the validation split and stored with the model. The binary window score is Eq.~\ref{eq:score}.
+	\item \textbf{Export.} The trained network is traced with TorchScript into one file that includes the weights, normalisation statistics, class names, thresholds and feature names, and was verified to give identical outputs as the original model on 100 test graphs. Five synthetic windows are run when the service starts, because the first calls of the TorchScript profiling executor take about 200~ms; this reduced the live p99 latency from 208~ms to 11~ms.
+\end{itemize}
+
+\section{Alert Classifier}
+The classifier turns the model output into a \texttt{Decision}. A window is ATTACK if its confidence is at least $\theta_a=0.85$ and the class is not Benign, SUSPICIOUS (logged only) if the confidence is between 0.5 and 0.85, and BENIGN otherwise. A host is an attacker if its attacker score is above the node threshold and it is not whitelisted. The host score is the \emph{mean} over the chunks that contain it, not the maximum, because a host is scored in about 20 chunks per window and the maximum gives a benign host hundreds of chances to exceed the threshold. A host must additionally be flagged in two consecutive windows before it is reported as a new attacker, and a per-host cool-down of 30~s prevents repeated alerts.
+
+\section{Mitigation Engine}
+
+\begin{table}[htbp]
+\centering
+\caption{Mitigation policy per attack type}
+\label{tab:policy}
+\small
+\begin{tabularx}{\textwidth}{|p{2.6cm}|p{3.7cm}|X|}
+\hline
+\textbf{Attack type} & \textbf{Action} & \textbf{Reason} \\ \hline
+DoS, BruteForce, WebAttack, Other & Drop all traffic from the attacker (priority 65535) & A small number of identifiable sources; dropping is exact and cheap. \\ \hline
+Probe & Rate-limit the scanner to 20 packets/s (priority 65435) & A scanner may share an address with legitimate use; throttling stops the scan and keeps the host reachable. \\ \hline
+Botnet & Isolate: drop all egress from the host & A compromised host should not talk to anyone. \\ \hline
+DDoS with $>20$ sources & Rate-limit traffic \emph{to the victim} to 200 packets/s (priority 65335, expires after 120~s) & Sources are spoofed, so blocking each address is useless; hosts with $\ge 5$ flows are still blocked individually. \\ \hline
+\end{tabularx}
+\end{table}
+
+Rate limits are in \emph{packets} per second, because flood packets are tiny (a 54-byte SYN at 1000 packets/s is only 430~kbit/s, which a 512~kbit/s meter passes almost untouched). Rule priorities follow severity, because two overlapping rules of equal priority have undefined precedence: with equal priorities a leftover victim rate-limit shadowed a later drop rule. Safety features are the whitelist (never block the controller, gateway or DNS), the 60~s idle and 300~s hard timeouts, a cool-down against rule storms, per-switch tracking of rule copies, manual unblock, and an audit log written for every action.
+
+\section{SDN Integration Layer}
+\begin{itemize}
+	\item \textbf{Push model.} The controller POSTs the flow statistics every 2~s and installs whatever rules come back in the response; the IDS needs no access to the switches and no server runs inside the controller. If the IDS is unreachable, forwarding continues (fail-open).
+	\item \textbf{Two flow tables.} Table~0 holds only IDS rules (drop, or meter followed by \texttt{goto} table~1); table~1 holds forwarding. IDS rules therefore never appear in the statistics used for detection, and unblocking is a single delete by cookie that does not disturb forwarding.
+	\item \textbf{Meters.} Rate limiting uses OpenFlow meters in packets-per-second mode. For switches without meter support the controller has a \texttt{--rate-limit-as-drop} option.
+\end{itemize}
+
+\section{Dashboard and Service API}
+The FastAPI application serves three pages: \texttt{/} (offline results, baselines, ablations, feature-selection comparison), \texttt{/live} (traffic graph, alert feed, active rules, latency, manual block/unblock) and \texttt{/pipeline} (progress of the end-to-end run). The main endpoints are \texttt{POST /api/flows} (called by the controller), \texttt{GET /api/alerts}, \texttt{GET /api/mitigations}, \texttt{POST /api/mitigations/block} and \texttt{unblock} (API-key protected), \texttt{GET /api/topology} and the server-sent-event stream \texttt{/api/live/stream}.
+
+\section{Deployment Architecture}
+
+\begin{figure}[htbp]
+\centering
+\scriptsize
+\begin{verbatim}
+ +-------------------------------- development host (Arch Linux, RTX 3050 laptop GPU) ------------+
+ |   IDS API + dashboard (web/app.py, port 3000, PyTorch model)                                   |
+ |        ^   POST /api/flows every 2 s   |   rules in the response                               |
+ |   +----+------------- Docker container gnn-ids-lab (privileged, --network host) -----------+   |
+ |   | os-ken controller (OpenFlow :6653)   Mininet: h1..h6, s1, s2 (Open vSwitch)            |   |
+ |   | scripts/inject_attack.py: benign traffic, hping3 / nmap / iperf3 attacks, pcap capture |   |
+ |   +----------------------------------------------------------------------------------------+   |
+ +------------------------------------------------------------------------------------------------+
+\end{verbatim}
+\caption{Deployment of the laboratory}
+\label{fig:deploy}
+\end{figure}
+
+
+\section{Design Decisions and Justification}
+Table~\ref{tab:decisions} summarises the main design decisions, each with the reason and the evidence collected during the project.
+
+\begin{longtable}{|p{3.6cm}|p{5.0cm}|p{5.4cm}|}
+\caption{Design decisions}\label{tab:decisions}\\
+\hline
+\textbf{Decision} & \textbf{Reason} & \textbf{Evidence / trade-off} \\ \hline
+\endfirsthead
+\hline \textbf{Decision} & \textbf{Reason} & \textbf{Evidence / trade-off} \\ \hline
+\endhead
+InSDN as the primary dataset & Has real IPs, ports and timestamps from an SDN testbed & The CICIDS2017 \texttt{MachineLearningCVE} files have none, so Phase~1 graphs had made-up nodes \\ \hline
+Only OpenFlow-derivable features & The live controller cannot produce CICFlowMeter statistics & One feature module shared by datasets and live path \\ \hline
+Count-based windows offline, time-based live & InSDN timestamps are mostly minute-level & 100-flow windows offline; 10~s live, split into 200-record chunks \\ \hline
+Time-ordered split with a gap & Overlapping windows leak under a random split & Phase~1 F1 fell from 0.994 to 0.983 with a time split \\ \hline
+Benign overlay on half of the attack windows & Raw windows are pure, so the attacker is trivially the only host & Forces the node head to find attackers among benign hosts \\ \hline
+Direction normalisation & CICFlowMeter forward side is the side seen first; many rows run victim $\to$ attacker & Corrects 27\% of metasploitable-2, 5\% of OVS and 20\% of benign rows; otherwise servers are labelled attackers \\ \hline
+Multi-task model & Windows give \emph{whether} and \emph{what}; mitigation needs \emph{who} & Node head enables per-host blocking \\ \hline
+Bidirectional message passing & A pure attacker has no incoming edges & Reversed edges with a direction flag \\ \hline
+GAT as main layer & Attention uses edge features and learns which neighbours matter & GCN and GraphSAGE kept as ablations; best host F1 with edge features \\ \hline
+TorchScript bundle & The service must not pair weights with wrong statistics & One file with weights, statistics, classes, thresholds; verified identical on 100 graphs \\ \hline
+Push model, mitigation in the response & No server in the controller; no extra round-trip; IDS needs no switch access & Fail-open if the IDS is down \\ \hline
+Two flow tables & IDS rules must not appear in the detection statistics & Table~0 IDS, table~1 forwarding; unblock by cookie \\ \hline
+5-tuple forwarding entries & A MAC-learning switch gives no per-flow counters & More entries and packet-ins during floods (\texttt{host\_pair} mode reduces them) \\ \hline
+os-ken instead of Ryu & Ryu is unmaintained and does not install on current Python & Same API; base class renamed; launcher script provided \\ \hline
+Packet-rate meters & A 54-byte SYN flood at 1000 packets/s is only 430~kbit/s & The first kbit/s meter reduced DDoS by only 31\% \\ \hline
+Priorities by severity & Equal-priority overlapping rules have undefined precedence & DoS reduction rose from 39\% to 100\% \\ \hline
+Mean host score and persistence & The maximum over about 20 chunks gives benign hosts many chances to exceed the threshold & Runs with a benign host blocked fell from 9 to 1, then to 0 \\ \hline
+Fine-tuning on laboratory traffic & Benign laboratory traffic differs from InSDN benign traffic & Lab window F1 0.69 $\to$ 0.996; FPR 0.987 $\to$ 0.017 \\ \hline
+\end{longtable}
+
+\section{Data Stores and Message Formats}
+The system does not use a database; state is kept in memory and in files, which keeps the deployment simple.
+
+\begin{table}[htbp]
+\centering
+\caption{Persistent and exchanged data}
+\label{tab:datastores}
+\small
+\begin{tabularx}{\textwidth}{|p{4.2cm}|X|}
+\hline
+\textbf{Item} & \textbf{Content} \\ \hline
+\texttt{data/insdn/cleaned/*.csv} & Cleaned dataset files with the binary \texttt{Label} and the class name \texttt{Attack} \\ \hline
+\texttt{data/graphs/insdn\_v2.pt} & Serialised graph windows for training, validation and test, with normalisation statistics \\ \hline
+\texttt{models/gat\_ids.pt}, \texttt{.json} & TorchScript bundle and its description (class names, thresholds, feature names, normalisation) \\ \hline
+\texttt{logs/mitigation\_log.jsonl} & One JSON object per mitigation action: time, rule id, action, match, attack type, confidence, reason, source (automatic or manual) \\ \hline
+\texttt{logs/suspicious\_log.jsonl} & Decisions at SUSPICIOUS level, for later review \\ \hline
+\texttt{results/phase2/*.json} & Metrics of each experiment, with the git commit, Python version and all parameters of the run \\ \hline
+\texttt{data/mininet/<run>/} & Ground-truth JSON, pcap, \texttt{flows.csv}, mitigation report and transfer evaluation of a laboratory run \\ \hline
+Controller $\to$ IDS message & JSON list of flow entries: datapath id, match fields, packet and byte counts, duration \\ \hline
+IDS $\to$ controller message & Decision summary and a list of actions of the form \texttt{\{op: add|delete, rule\_id, cookie, action: drop|rate\_limit, match, priority, idle\_timeout, hard\_timeout, rate\_pps\}} \\ \hline
+\end{tabularx}
+\end{table}
+
+\section{Service Interface Specification}
+\begin{table}[htbp]
+\centering
+\caption{REST endpoints of the IDS service}
+\label{tab:api}
+\small
+\begin{tabularx}{\textwidth}{|p{2.0cm}|p{4.3cm}|p{1.6cm}|X|}
+\hline
+\textbf{Method} & \textbf{Path} & \textbf{Key} & \textbf{Purpose} \\ \hline
+GET & \texttt{/}, \texttt{/live}, \texttt{/pipeline} & No & Dashboard pages \\ \hline
+GET & \texttt{/api/metrics/gnn}, \texttt{/api/metrics/baseline}, \texttt{/api/metrics/phase2}, \texttt{/api/classification-report} & No & Result files for the offline page \\ \hline
+GET & \texttt{/api/feature-selection} & No & Feature-selection comparison \\ \hline
+GET & \texttt{/api/summary}, \texttt{/api/health}, \texttt{/api/pipeline} & No & Overview, service state and pipeline progress \\ \hline
+POST & \texttt{/api/flows} & Yes & Flow statistics from the controller; the response carries the decision and actions \\ \hline
+GET & \texttt{/api/alerts}, \texttt{/api/mitigations}, \texttt{/api/mitigations/log} & No & Alerts, active rules and audit log \\ \hline
+POST & \texttt{/api/mitigations/block}, \texttt{/api/mitigations/unblock} & Yes & Manual block and unblock \\ \hline
+GET & \texttt{/api/topology}, \texttt{/api/live/status}, \texttt{/api/live/latency}, \texttt{/api/live/stream} & No & Live graph, status, latency and event stream \\ \hline
+\end{tabularx}
+\end{table}
+
+\section{Worked Example: A Spoofed DDoS Window}
+This example follows one live window through the system. During a DDoS run, hping3 sends SYN packets with random source addresses to the web server (10.0.0.4). In the 10-second window the controller reports about 4,000 flow entries, almost all with one or two packets, TCP, destination port 80, and a distinct source address. The graph builder creates about as many nodes as flows: one victim node with an in-degree of several thousand, and thousands of attacker nodes with out-degree 1, out-flows 1 and zero port entropy. The window is divided into 20 or more chunks of 200 records. The model gives each chunk an attack probability; the highest one (for example 0.99) becomes the confidence, and the class with the highest probability among the attack classes (DDoS) becomes the attack type. Each source host has a node score from the chunk it appears in, and many exceed the node threshold. Because the number of attackers is above the spoof threshold of 20, the mitigation engine does \emph{not} install thousands of rules. Instead, after two consecutive DDoS windows, it installs one rule: rate-limit all traffic to 10.0.0.4 to 200 packets/s with priority 65335, expiring after 120~s. Any host that has at least five flows in the window (a real source hidden in the flood) is also blocked individually with a drop rule. The controller installs the meter and the rule in table~0 of both switches, and the SYN flood is throttled at the first switch it crosses. The numbers in this example are illustrative, not measured; the measured results for 12 runs are in Chapter~7.
+
+\section{Performance and Scalability Considerations}
+\begin{itemize}
+	\item \textbf{Window size and latency.} The time to process a window grows roughly linearly with the number of flow records (Table~\ref{tab:latency}), because the work is done on chunks of 200 records. A busy network is therefore handled by sampling or by more frequent, smaller windows rather than by enlarging a single graph.
+	\item \textbf{State bounds.} The collector stores at most 50,000 flows and evicts the oldest, so a flood cannot exhaust memory.
+	\item \textbf{Rule count.} Spoofed floods are handled by one victim rule instead of one rule per source, which keeps the flow tables small. Only confirmed hosts are blocked and each rule expires.
+	\item \textbf{Controller load.} Polling every two seconds is a trade-off between reaction time and the load of statistics requests; the interval is a command-line option.
+	\item \textbf{Hardware.} A CPU is sufficient; the GPU is not faster for typical window sizes (Chapter~7).
+\end{itemize}
+
+\section{Fault Tolerance and Security Design}
+\begin{itemize}
+	\item \textbf{Fail-open.} If the IDS is unreachable, the controller logs the error and forwarding continues; the network is never blocked by the failure of the security component.
+	\item \textbf{Safe defaults.} Unknown labels become ``Other'', never ``Benign''; whitelisted addresses are never blocked; at most one rule per match is kept; all rules expire.
+	\item \textbf{Authentication.} The flow-upload and manual block/unblock endpoints need an API key that the demo script generates randomly for every run.
+	\item \textbf{Auditability.} Every automatic or manual action is logged with its reason, and the dashboard shows the log.
+	\item \textbf{Consistency.} Each switch keeps its own copy of a rule; the engine treats a rule as removed only after all copies are removed, since a copy on a switch that the attack does not cross may idle out earlier.
+\end{itemize}
+
+\section{About Software Requirements}
+The software requirement specification is summarised in Appendix~E (operating system, Python 3.14, PyTorch 2.11, PyTorch Geometric 2.7, scikit-learn 1.8, XGBoost 3.2, FastAPI, Docker image based on Ubuntu 22.04 with Mininet 2.3, Open vSwitch 2.17 and os-ken 2.8.1). The mapping of the requirements to the components is given in Table~\ref{tab:trace} at the end of Chapter~5.
+
+
+%% new chapter
+
+\chapter{Low Level Design}
+This chapter presents the detailed designs of the modules that are specific to this project and maps them to the requirements of Chapter~3.\\
+
+\section{Class Design}
+
+\begin{figure}[htbp]
+\centering
+\scriptsize
+\begin{verbatim}
+ +----------------------+      +------------------------+      +-----------------------+
+ | FlowCollector        |      | InferenceEngine        |      | AlertClassifier       |
+ |----------------------|      |------------------------|      |-----------------------|
+ | window_seconds       |      | model (TorchScript)    |      | attack_threshold      |
+ | max_flows            |      | mu, sigma, thresholds  |      | suspicious_threshold  |
+ | ingest(entries)      |----->| class_names            |----->| confirm_windows       |
+ | get_current_window() |  df  | warmup()               | Pred | whitelist, cooldown   |
++----------------------+      | predict(records)       |      | decide(pred, thr)     |
+                               +------------------------+      +-----------+-----------+
+                                                                           | Decision
+ +----------------------+      +------------------------+                  v
+ | IDSController(os-ken)|<-----| IDS service (FastAPI)  |<-----+-----------------------+
+ |----------------------| acts |------------------------| acts | MitigationEngine      |
+ | _monitor()           |      | POST /api/flows        |      |-----------------------|
+ | flow_stats_reply()   |      | alerts, rules, SSE     |      | policy, rules{}       |
+ | apply_action(cmd)    |      +------------------------+      | handle(decision)      |
+ | _apply_add/_delete   |                                      | block / unblock       |
+ +----------------------+                                      | drain_outbox()        |
+                                                               +-----------------------+
+\end{verbatim}
+\caption{Class diagram of the live path (simplified)}
+\label{fig:classes}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{CRC cards of the main classes}
+\label{tab:crc}
+\small
+\begin{tabularx}{\textwidth}{|p{3cm}|X|X|}
+\hline
+\textbf{Class} & \textbf{Responsibilities} & \textbf{Collaborators} \\ \hline
+FlowCollector & Keep the state of active flows, derive activity from counter changes, evict old flows, return the current window as a table. & IDS service, feature builder \\ \hline
+InferenceEngine & Normalise features, split large windows into chunks, run the TorchScript model, aggregate chunk results to window class, confidence, victims and per-host scores. & FlowCollector, AlertClassifier \\ \hline
+AlertClassifier & Convert predictions into ATTACK / SUSPICIOUS / BENIGN, apply node threshold, whitelist, persistence and cool-down. & InferenceEngine, MitigationEngine \\ \hline
+MitigationEngine & Apply policy, assign priorities, create and expire rules, keep audit log, queue actions for the controller. & AlertClassifier, IDSController \\ \hline
+IDSController & Forwarding, statistics polling, posting, installing and deleting rules and meters per switch, report flow-removed events. & Open vSwitch, IDS service \\ \hline
+MultiTaskGNN & Encode nodes and edges, message passing, node and graph heads. & Trainer, InferenceEngine (via TorchScript) \\ \hline
+\end{tabularx}
+\end{table}
+
+\section{Sequence Design of One Detection Cycle}
+
+\begin{figure}[htbp]
+\centering
+\scriptsize
+\begin{verbatim}
+ Switch        Controller            IDS service           Inference/Classifier     Mitigation
+   |  FlowStatsReply  |                    |                        |                    |
+   |----------------->| POST /api/flows    |                        |                    |
+   |                  |------------------->| ingest(); window()     |                    |
+   |                  |                    |----------------------->| predict(); decide()|
+   |                  |                    |                        |------------------->| handle(decision)
+   |                  |                    |<-----------------------------------------------| actions[]
+   |                  |<-------------------| 200 {decision, actions}|                    |
+   |<-- FlowMod/MeterMod ---               |                        |                    |
+   |   (table 0: drop / meter)             |                        |                    |
+\end{verbatim}
+\caption{Sequence diagram: from flow statistics to an installed rule}
+\label{fig:sequence}
+\end{figure}
+
+\section{State Design of a Host}
+
+A host is tracked by the classifier and the mitigation engine through the states of Figure~\ref{fig:state}: it is \emph{Normal} until flagged in a window, \emph{Candidate} when flagged once, \emph{Blocked} after confirmation in consecutive windows (a rule is installed), and returns to \emph{Normal} when the rule expires or is removed manually; the cool-down prevents an immediate repeat of the same alert.
+
+\begin{figure}[htbp]
+\centering
+\scriptsize
+\begin{verbatim}
+   +--------+  flagged, ATTACK window   +-----------+  flagged again (confirm_windows = 2) +---------+
+   | Normal |-------------------------->| Candidate |------------------------------------->| Blocked |
+   +--------+<--------------------------+-----------+                                     +----+----+
+        ^         not flagged next window                                                       |
+        +-------------------------------------------------------------------------------------+
+                    idle 60 s / hard 300 s timeout, or manual unblock (rule deleted by cookie)
+\end{verbatim}
+\caption{State diagram of a host in the mitigation loop}
+\label{fig:state}
+\end{figure}
+
+\section{About Algorithm}
+
+\subsection{Algorithm 1: Graph window construction (offline)}
+\begin{enumerate}[label=\arabic*.]
+	\item Load the cleaned CSV of one file; convert every row to a forward record and, if backward packets exist, a reverse record; set \texttt{is\_reverse} for records that leave the lower-port side.
+	\item Cut windows of $N=100$ consecutive flows with stride $s$ (25; 10 for the benign file).
+	\item For each window, compute the window label: the most frequent attack class if at least 10\% of the initiator-direction records are attacks, else Benign.
+	\item Assign each window to train / validation / test by chronological position within its (file, class) stream, discarding windows within a gap of the boundary so that no flow is shared.
+	\item With probability 0.5, overlay a benign window of the same split onto an attack window; the label of the attack window is kept.
+	\item Build the graph: nodes are IP addresses; edges are records; compute the 16 node features and 16 edge features; set the host label to 1 for hosts that initiated an attack record.
+	\item Fit normalisation statistics ($\mu$, $\sigma$) on the training windows and store them in the dataset file.
+\end{enumerate}
+
+\subsection{Algorithm 2: Training the multi-task GNN}
+\begin{enumerate}[label=\arabic*.]
+	\item Compute class weights $w_c\propto 1/\sqrt{n_c}$ (capped at 10) for the window classes and the host classes.
+	\item For each epoch, for each mini-batch of 64 graphs: forward pass to obtain graph logits and node logits; compute $\mathcal{L}=0.5\,\mathcal{L}_{\text{node}}+0.5\,\mathcal{L}_{\text{graph}}$ (Eq.~\ref{eq:loss}); clip the gradient norm at 2.0 and update with AdamW \cite{bib:adam} (learning rate $10^{-3}$, weight decay $10^{-4}$).
+	\item After each epoch, evaluate on the validation split; keep the checkpoint with the best selection score, the mean of the window F1, the host F1 and the major-class macro-F1.
+	\item Stop after 10 epochs without improvement (patience) or 60 epochs.
+	\item Tune the window and node thresholds on the validation split; save the checkpoint together with thresholds and normalisation statistics; export to TorchScript.
+\end{enumerate}
+
+\subsection{Algorithm 3: Live detection and mitigation cycle}
+\begin{enumerate}[label=\arabic*.]
+	\item \textbf{Controller:} every 2~s send FlowStatsRequest to all switches; convert replies to entries (datapath id, match fields, counters, duration); POST to the IDS.
+	\item \textbf{Collector:} update flow states; remove flows idle for more than $W$; return the active records.
+	\item \textbf{Inference:} compute features; split into chunks of at most 200 records; run the model on the batch; the chunk with the highest attack probability $s_c$ decides the window: confidence $=\max_c s_c$ and the attack type is its most probable attack class; host score $=$ mean of its chunk scores.
+	\item \textbf{Classifier:} determine the level (ATTACK / SUSPICIOUS / BENIGN); list hosts above the node threshold that are not whitelisted; increment the streak counters; a host becomes a \emph{new attacker} after \texttt{confirm\_windows} consecutive windows and outside the cool-down.
+	\item \textbf{Mitigation:} for each new attacker choose the action by attack type (Table~\ref{tab:policy}); if the DDoS source count exceeds the spoof threshold, create a victim-protection rate limit instead (after two consecutive DDoS windows) and still block heavy hitters; assign the priority; skip duplicates; append the add action to the outbox and write the audit log; expire old rules.
+	\item \textbf{Response:} return the outbox in the HTTP response; the controller applies each action (\texttt{apply\_action}) on every switch and records the cookie per switch.
+\end{enumerate}
+
+\subsection{Algorithm 4: Mitigation rule creation (pseudocode)}
+{\footnotesize
+\begin{verbatim}
+function handle(decision):
+    expire_rules(now)
+    if decision.level != ATTACK or not decision.confirmed_hosts: return []
+    if decision.type == DDoS and len(decision.attackers) > spoof_threshold:
+        add(match={ipv4_dst: victim}, action=rate_limit(victim_rate_pps), prio=65335)
+        for ip in attackers with flows >= heavy_hitter_flows:
+            add(match={ipv4_src: ip}, action=drop, prio=65535)
+    else:
+        for ip in decision.new_attackers:
+            action = policy[decision.type]          # drop | rate_limit | isolate
+            add(match={ipv4_src: ip}, action, prio = priority_by_severity(action))
+    drain_outbox()                                   # returned to the controller
+\end{verbatim}}
+
+\section{About Flowchart}
+
+\subsection{Context Flow Diagram (Level 0)}
+
+\begin{figure}[htbp]
+\centering
+\scriptsize
+\begin{verbatim}
+  Administrator --(view, block/unblock)--> +-----------------+ <--(flow statistics)-- SDN Controller
+                <--(alerts, results)------ | GNN-IDS for SDN | ---(mitigation rules)-> SDN Controller
+  ML Engineer --(datasets, config)-------> +-----------------+
+              <--(models, metrics)---------
+\end{verbatim}
+\caption{Context flow diagram}
+\label{fig:cfd}
+\end{figure}
+
+\subsection{Data Flow Diagram (Level 1)}
+
+\begin{figure}[htbp]
+\centering
+\scriptsize
+\begin{verbatim}
+ SDN switches -> [1 Collect flow stats] -D1 flow table-> [2 Build window & features] -> [3 Build graph]
+                                                                                           |
+ D2 model bundle ---------------------------------------------------------------------> [4 GNN inference]
+                                                                                           | scores
+                                                       D3 whitelist/config -----------> [5 Classify alert]
+                                                                                           | decision
+                           D4 audit log <---------------------------------------------- [6 Mitigation policy]
+                                                                                           | rules
+                           SDN switches <-- [7 Install / remove rules] <------------------+
+                           Dashboard    <-- [8 Publish state (REST/SSE)] <-- decisions, rules, latency
+\end{verbatim}
+\caption{Data flow diagram of the live path}
+\label{fig:dfd}
+\end{figure}
+
+\subsection{Offline Pipeline Flow}
+
+\begin{figure}[htbp]
+\centering
+\scriptsize
+\begin{verbatim}
+ Raw InSDN CSVs -> clean_data.py -> label mapping -> graph_builder_v2.py -> insdn_v2.pt (train/val/test)
+      -> feature_selection.py (8 methods) -> baselines_v2 (RF, XGBoost) and train_gnn_v2.py (GAT)
+      -> evaluate_v2.py + ablations (GCN, SAGE, no edge features, window 50 / 200)
+      -> export.py (TorchScript bundle) -> benchmark_latency.py -> make_phase2_report.py
+\end{verbatim}
+\caption{Offline training and evaluation pipeline}
+\label{fig:offline}
+\end{figure}
+
+
+\section{Module Design}
+Table~\ref{tab:modules} lists the modules of the code base and their responsibilities, which is the mapping between the architecture and the implementation.
+
+\begin{longtable}{|p{4.6cm}|p{9.4cm}|}
+\caption{Modules and responsibilities}\label{tab:modules}\\
+\hline
+\textbf{Module} & \textbf{Responsibility} \\ \hline
+\endfirsthead
+\hline \textbf{Module} & \textbf{Responsibility} \\ \hline
+\endhead
+\texttt{preprocessing/clean\_data.py} & Deduplicate rows, convert types, handle missing and infinite values, write cleaned CSVs with the binary and class labels \\ \hline
+\texttt{preprocessing/labels.py} & Map dataset-specific labels to the eight canonical classes \\ \hline
+\texttt{preprocessing/openflow\_features.py} & Single definition of the flow record, 16 edge features, 16 node features and the direction normalisation \\ \hline
+\texttt{preprocessing/graph\_builder\_v2.py} & Window cutting, window and host labels, benign overlay, time-ordered split, graph serialisation \\ \hline
+\texttt{preprocessing/feature\_selection.py} & Comparison of selection and reduction methods and choice of the applied subset \\ \hline
+\texttt{models/gnn\_v2.py} & The multi-task GNN with GAT, GCN or GraphSAGE layers \\ \hline
+\texttt{models/train\_gnn\_v2.py}, \texttt{evaluate\_v2.py} & Training loop with class weights, validation-based selection and thresholds; evaluation metrics \\ \hline
+\texttt{models/export.py} & TorchScript export with the embedded bundle and the equivalence check \\ \hline
+\texttt{inference/inference\_engine.py} & Normalisation, chunking, model call, aggregation, warm-up and latency measurement \\ \hline
+\texttt{inference/classifier.py} & Alert levels, node threshold, whitelist, persistence, cool-down \\ \hline
+\texttt{mitigation/mitigation\_engine.py} & Policy, priorities, rule life cycle, outbox, audit log \\ \hline
+\texttt{controller/ids\_controller.py}, \texttt{flow\_collector.py}, \texttt{run\_controller.py} & Forwarding, polling, posting, rule installation; collector state; launcher \\ \hline
+\texttt{topology/sdn\_topology.py} & Mininet topology with two switches and six hosts \\ \hline
+\texttt{scripts/} & Pipelines, attack injection, flow labelling, replay, latency benchmark, mitigation analysis, report generation \\ \hline
+\texttt{web/app.py} and \texttt{web/static/} & REST API, server-sent events and the three dashboard pages \\ \hline
+\end{longtable}
+
+\section{Rule Encoding in the Switch}
+Table~\ref{tab:ruleenc} shows how an action of the mitigation engine is turned into OpenFlow messages by the controller. The IDS rules live in table~0; any packet that no IDS rule consumes continues to table~1, where the forwarding entries are.
+
+\begin{table}[htbp]
+\centering
+\caption{Encoding of mitigation actions}
+\label{tab:ruleenc}
+\small
+\begin{tabularx}{\textwidth}{|p{2.8cm}|p{3.8cm}|X|}
+\hline
+\textbf{Action} & \textbf{Match} & \textbf{OpenFlow encoding (table 0)} \\ \hline
+drop & \texttt{ipv4\_src = attacker} & Entry with priority 65535 and an empty instruction list (packets are discarded); idle timeout 60~s, hard timeout 300~s; cookie marks it as an IDS rule \\ \hline
+rate\_limit (scanner) & \texttt{ipv4\_src = scanner} & Meter with a drop band at 20 packets/s; entry with priority 65435 and instructions \texttt{meter}, then \texttt{goto\_table 1} \\ \hline
+rate\_limit\_victim & \texttt{ipv4\_dst = victim} & Meter with a drop band at 200 packets/s; entry with priority 65335, hard timeout 120~s, instructions \texttt{meter}, then \texttt{goto\_table 1} \\ \hline
+isolate (Botnet) & \texttt{ipv4\_src = host} & Drop rule for the egress of the host \\ \hline
+delete & Cookie of the rule & Delete by cookie from table~0 on every switch where a copy exists \\ \hline
+\end{tabularx}
+\end{table}
+
+\section{Additional Algorithms}
+
+\subsection{Algorithm 5: Direction normalisation}
+\begin{enumerate}[label=\arabic*.]
+	\item For each dataset row, create the forward record $(s,d,p_s,p_d,\dots)$ from the forward counters, and a reverse record from the backward counters if backward packets exist.
+	\item Compare the two ports of the flow: the endpoint with the lower port number is taken as the \emph{server}.
+	\item Mark a record as a \emph{response} (\texttt{is\_reverse}) if it leaves the server.
+	\item In the label step, only non-response records with an attack label make their source an attacker node; the response records still carry the attack label for the flow-level baselines but do not make the victim an attacker.
+\end{enumerate}
+This procedure is a heuristic, since two ephemeral ports are possible; it corrects the large majority of the reversed rows, and its effect on the labels was checked in the exploratory analysis.
+
+\subsection{Algorithm 6: Threshold selection on validation data}
+\begin{enumerate}[label=\arabic*.]
+	\item Compute the validation scores of the window head ($s_t=1-P(\text{Benign})$) and the node head ($\hat{p}_v$).
+	\item For each score, evaluate the thresholds $0.05,0.06,\dots,0.95$ on the validation split.
+	\item Choose the threshold with the highest F1 (ties are broken in favour of higher recall, then the lower threshold).
+	\item Store both thresholds in the checkpoint and in the exported bundle; the test split is used only once, with these fixed thresholds.
+\end{enumerate}
+
+\subsection{Algorithm 7: Feature-selection comparison}
+\begin{enumerate}[label=\arabic*.]
+	\item Take the edge table (one row per flow record) and the node table (one row per host window) from the training, validation and test graphs (at most 40,000 rows each).
+	\item For each method $m$ and each $k\in\{4,6,8,10,12\}$: rank features (selection) or fit the projection on the training rows (reduction), keep $k$ features or components, fit a Random Forest with 60 trees on the training rows, and record the F1 on validation and test.
+	\item Select the entry with the best validation F1 among the selection methods. If a smaller $k$ is within the tolerance (0.005) of the best, take the smaller one.
+	\item Write the comparison and the chosen feature indices to \texttt{feature\_selection.json}; the training script reads the indices and builds the model with that many input features.
+\end{enumerate}
+
+\section{Complexity Analysis}
+Let $N$ be the number of hosts, $E$ the number of flow records, $d$ the hidden size (64) and $H$ the number of heads (4) of one chunk.
+\begin{itemize}
+	\item Feature computation is $O(E)$ for the edge features and $O(E+N)$ for the node features (group-by operations).
+	\item A GAT layer costs $O(E\,d)$ per layer for the attention and aggregation, plus $O(N\,d^2)$ for the linear transformation; with two layers and reversed edges the total is $O\big(2\cdot(2E\,d+N\,d^2)\big)$.
+	\item The graph head and the node head add $O(N\,d^2)$.
+	\item A window with $m$ records is split into $\lceil m/200\rceil$ chunks, so the total cost is linear in $m$ with a small constant, which matches the measured latency (Table~\ref{tab:latency}).
+\end{itemize}
+The model has about $6.5\times10^4$ parameters, so memory is not a concern.
+
+\section{Exceptional Conditions and Handling}
+\begin{table}[htbp]
+\centering
+\caption{Handling of abnormal conditions}
+\label{tab:exceptions}
+\small
+\begin{tabularx}{\textwidth}{|p{4.0cm}|X|}
+\hline
+\textbf{Condition} & \textbf{Handling} \\ \hline
+Empty window & The engine returns Benign with confidence 0 and no actions. \\ \hline
+IDS unreachable & The controller logs ``IDS unreachable'' and continues forwarding; polling goes on and the next successful upload resumes detection. \\ \hline
+Switch without meter support & Rate-limit rules are converted to drop rules when \texttt{--rate-limit-as-drop} is used. \\ \hline
+Whitelisted host flagged by the model & The host is put in the \texttt{suppressed} list of the decision and never blocked. \\ \hline
+Same attacker flagged repeatedly & Cool-down of 30~s and duplicate-rule check prevent rule storms. \\ \hline
+Rule copy removed on one switch only & The rule stays active in the engine until all copies are removed or expired. \\ \hline
+Very large window & Chunking at 200 records; the flow table of the collector is bounded to 50,000 flows. \\ \hline
+Unknown dataset label & Mapped to Other, never to Benign. \\ \hline
+Invalid API key or malformed request & HTTP error returned, no state change. \\ \hline
+First calls to the TorchScript model are slow & Warm-up with five synthetic windows at start. \\ \hline
+\end{tabularx}
+\end{table}
+
+\section{Test Design}
+The test strategy has four levels: \emph{unit tests} for preprocessing, label mapping, the split gap, feature extraction and the Mininet tools; \emph{integration tests} of the live path (feature parity between dataset and live collector, classifier decisions, mitigation actions); \emph{offline experiments} (baselines, ablations, feature selection, latency); and \emph{system tests} in the laboratory (replay of held-out flows and live attack runs). The test cases are listed in Chapter~7 and mapped to requirements in Table~\ref{tab:trace}.
+
+\section{Traceability: Requirements to Design}
+
+\begin{table}[htbp]
+\centering
+\caption{Mapping of requirements to design elements and tests}
+\label{tab:trace}
+\small
+\begin{tabularx}{\textwidth}{|p{2cm}|X|p{3.4cm}|}
+\hline
+\textbf{Requirement} & \textbf{Design element} & \textbf{Verified by} \\ \hline
+FR1 & \texttt{clean\_data.py}, \texttt{labels.py} (unknown $\to$ Other) & TC-01 \\ \hline
+FR2 & \texttt{openflow\_features.py}, shared by dataset and live path & TC-02, TC-03 \\ \hline
+FR3 & Algorithm 1, time-ordered split with gap & TC-04 \\ \hline
+FR4, FR5 & Algorithm 2, baselines, ablations, \texttt{evaluate\_v2.py} & TC-05 to TC-08 \\ \hline
+FR6 & \texttt{export.py}, TorchScript bundle & TC-09 \\ \hline
+FR7, FR8, FR10 & \texttt{IDSController}, \texttt{FlowCollector}, push model & TC-10, TC-11 \\ \hline
+FR9, FR11 & \texttt{AlertClassifier}, \texttt{MitigationEngine}, audit log & TC-12 to TC-15 \\ \hline
+FR12 & FastAPI application and dashboard pages & TC-16 \\ \hline
+FR13 & \texttt{inject\_attack.py}, \texttt{analyze\_mitigation.py} & TC-13, TC-14 \\ \hline
+NFR1 & Chunking, TorchScript, warm-up & TC-09, TC-11 \\ \hline
+NFR2, NFR3, NFR4 & Thresholds, persistence, priorities, whitelist, fail-open & TC-05, TC-12 to TC-15 \\ \hline
+NFR5 to NFR10 & API key, YAML configs, Docker lab, single feature module, pytest suite & TC-16, TC-17 \\ \hline
+\end{tabularx}
+\end{table}
+
+\textbf{Note:} the source code is intentionally not reproduced in this report; it is available in the repository listed in Appendix~E.
+
+
+%% new chapter
+
+\chapter{Implementation}
+
+This chapter describes how the designs of Chapters 4 and 5 were implemented. It follows the order of the data: cleaning, record conversion, graph construction, training, export, inference, controller, mitigation, dashboard and laboratory. Source code is not reproduced; module names are given so that each description can be found in the repository (Appendix~F).\\
+
+\section{Development Environment and Project Organisation}
+The system is written in Python 3.14 (about 6,100 lines in the main packages, not counting tests and the front end). The code is organised in packages by function (\texttt{preprocessing}, \texttt{models}, \texttt{inference}, \texttt{mitigation}, \texttt{controller}, \texttt{topology}, \texttt{scripts}, \texttt{web}) with a common package for configuration and metrics. Three practices were applied throughout:
+\begin{itemize}
+	\item \textbf{One configuration file.} Every script accepts \texttt{--config configs/phase2.yaml}. Each top-level section of the file belongs to one script and its keys are the script's command-line flags with dashes replaced by underscores, so a value can be overridden on the command line and the defaults are documented in one place.
+	\item \textbf{Run metadata.} Every result file starts with a \texttt{run} record containing the git commit (with a ``dirty'' marker if there are uncommitted changes), the creation time, the Python version and all parameters. Numbers in this report can therefore be traced to the code state that produced them.
+	\item \textbf{Pinned environment.} The dependencies are listed with exact versions (Appendix~E), so that the results can be reproduced.
+\end{itemize}
+
+\section{Data Cleaning}
+The cleaning module reads every raw CSV file and performs the following steps, recording the counts in a per-file summary (rows before and after, duplicates removed, missing values left, class counts):
+\begin{enumerate}
+	\item Strip white space from the column names, because CICFlowMeter files contain names with leading spaces.
+	\item Locate the label column ignoring case.
+	\item Replace infinite values (produced by rate columns with zero duration) by missing values.
+	\item Drop exact duplicate rows.
+	\item Fill missing numerical values with the median of the column (0 if the whole column is empty) and missing text values with ``unknown''.
+	\item Map the textual label to the canonical class name (new column \texttt{Attack}) and to the binary label (column \texttt{Label}, 0 for Benign, 1 otherwise).
+	\item Write the cleaned file to \texttt{data/insdn/cleaned/}.
+\end{enumerate}
+The mapping function ignores case, white space and punctuation, so that the mis-encoded dash in ``Web Attack \texttt{\char`\?} XSS'' of CICIDS2017 is still recognised. Unit tests cover nine example labels, including an unknown one, and the binary label.
+
+\section{Conversion of Rows to Flow Records}
+The function that converts dataset rows to flow records first detects which column names are used (InSDN and the two CICIDS2017 variants name the columns differently). It then creates one forward record for each row and, if backward packets exist, a reverse record with source and destination swapped. Bytes are computed as payload bytes plus the number of packets times the frame header size (54 bytes for TCP, 42 for UDP and other protocols), duration is converted from microseconds to seconds, and the protocol number is kept. The direction normalisation (Algorithm 5) marks the records leaving the server side. For live data, a second function converts the flow-statistics entries of the controller (datapath id, match fields and counters) to the same record format, so that the same functions then compute the features. Unit tests check that a row with backward packets gives two records, that rows that start at the server are corrected, that ICMP flows have no port buckets, and that the conversion of OpenFlow statistics gives the expected counters.
+
+\section{Window and Graph Construction}
+\textbf{Window cutting.} In count mode each flow receives an index in capture order. The records are sorted by this index, and for each start position (0, 25, 50, $\dots$) the records with an index in $[s,s+100)$ form a window; the boundaries are found with a binary search, so that cutting is linear in the number of records. Windows with fewer than two flows are dropped. A time mode (windows of $W$ seconds) is also implemented for datasets with accurate timestamps, such as the CICIDS2017 files with IP addresses.\\
+
+\textbf{Labels.} The window label is computed on the non-response records as described in Section~3.2. The host label is set for the source of each non-response attack record.\\
+
+\textbf{Graph object.} Each window becomes one PyTorch Geometric \texttt{Data} object with the attributes listed in Table~\ref{tab:dataattrs}. Node identifiers are obtained by factorising the IP addresses of the window, so that two records with the same address share a node.
+
+\begin{table}[htbp]
+\centering
+\caption{Attributes of a graph window}
+\label{tab:dataattrs}
+\small
+\begin{tabularx}{\textwidth}{|p{3.2cm}|X|}
+\hline
+\textbf{Attribute} & \textbf{Meaning} \\ \hline
+\texttt{x} & Node feature matrix ($N\times16$) \\ \hline
+\texttt{edge\_index}, \texttt{edge\_attr} & Directed edges (source node, destination node) and edge feature matrix ($E\times16$) \\ \hline
+\texttt{y}, \texttt{y\_multi} & Binary window label and the class identifier (0 to 7) \\ \hline
+\texttt{node\_y} & 1 for hosts that initiated attack flows \\ \hline
+\texttt{edge\_y}, \texttt{edge\_multi} & Per-record labels, used by the flow-level baselines \\ \hline
+\texttt{edge\_first} & True if the record did not occur in an earlier window of the same split (so that overlapping windows do not count a flow twice in the baselines) \\ \hline
+\texttt{edge\_reverse} & True for response records \\ \hline
+\texttt{node\_ips}, \texttt{source\_id}, \texttt{window\_start} & IP address of each node, index of the source file and the position of the window; used for the split and for reporting \\ \hline
+\end{tabularx}
+\end{table}
+
+\textbf{Chronological split.} Within each (file, class) stream the windows are ordered by their start position and divided into 70\% training, 15\% validation and 15\% test. A gap of $\lceil 100/25\rceil=4$ windows is left at each boundary, because a window of 100 flows with stride 25 shares flows with its three neighbours on each side; with the gap, no flow occurs in two splits, which a unit test confirms. The benign overlay is applied inside each split, so that the benign hosts added to a test attack window come from test windows only. The builder prints the number of graphs per class and split and stores the statistics (mean and maximum number of nodes and edges, fraction of attacker nodes) in the metadata of the dataset file.
+
+\section{Feature Normalisation}
+The statistics $\mu$ and $\sigma$ of Equation~\ref{eq:norm} are computed from the training graphs only and stored as a small object that can be converted to a dictionary and back. The same object is applied to the validation and test graphs, written into the checkpoint, embedded in the export bundle and used by the inference engine; this is the guarantee that training and live inference use identical normalisation. If a feature subset is selected, the columns are cut from the graphs \emph{before} the statistics are computed, and the selection (indices and names) is stored with the checkpoint.
+
+\section{Baselines}
+The baselines are scikit-learn's Random Forest with 200 trees \cite{bib:rf,bib:sklearn} and XGBoost with 300 trees \cite{bib:xgb}. Both are trained at the flow level on the edge features of the records that occur for the first time in the training split. A window score is the mean attack probability over its records; this is a simple and fair aggregation. For host decisions, a separate model is trained on the same per-host features that the GNN receives, so that the comparison does not give the GNN an advantage in the information, only in the use of the graph structure. All results use the shared metric functions, so that the numbers of the baselines and of the GNN are computed by identical code.
+
+\section{Model Training}
+Training follows Algorithm 2. The implementation details are:
+\begin{itemize}
+	\item \textbf{Batching.} Graphs are batched by PyTorch Geometric's \texttt{DataLoader} with 64 graphs per batch; the node IP lists are excluded from the batch because they are strings.
+	\item \textbf{Loss.} Two weighted cross-entropy terms (graph head with 8 classes, node head with 2 classes), combined with $\alpha=0.5$. The class weights are the square root of the inverse class frequency, capped at 10. For the final training run, the graph-head weights were 0.61 (Benign), 0.72 (DDoS), 1.09 (DoS), 0.81 (Probe), 7.2 (BruteForce) and 10 (WebAttack and Botnet); the node weights were 1.14 (non-attacker) and 0.90 (attacker).
+	\item \textbf{Optimisation.} AdamW \cite{bib:adam} with gradient-norm clipping at 2.0; the learning rate is halved when the validation selection score has not improved for 5 epochs.
+	\item \textbf{Model selection.} After every epoch the validation windows are evaluated and the selection score (mean of window F1, node F1 and major-class macro-F1) is computed. The weights of the best epoch are written to a temporary file, and training stops after 10 epochs without improvement of at least $10^{-4}$.
+	\item \textbf{Thresholds.} After training, the best weights are reloaded; the window and node thresholds are chosen on the validation predictions (grid from 0.05 to 0.95 in steps of 0.01, maximum F1) and applied once to the test split.
+	\item \textbf{Checkpoint.} The checkpoint holds the weights, the model configuration, the normalisation statistics, the thresholds, the class names, feature names, the feature selection and the metadata of the graph file.
+	\item \textbf{Fine-tuning.} Additional graph files (for example, labelled laboratory runs) can be passed to the training script; their training graphs are repeated by an oversampling factor so that a small number of laboratory windows is not overwhelmed by the InSDN windows, and their validation and test graphs are added to the corresponding splits.
+\end{itemize}
+In the last training run (feature-selected model), validation loss fell from 0.092 in the first epoch to 0.021 in epoch 8, where the best selection score was reached (window F1 1.0, node F1 0.9956, major-class macro-F1 0.9989); training stopped after epoch 18.
+
+\section{Export and Verification}
+The export script loads the checkpoint, converts the model with \texttt{torch.jit.script}, and saves it together with a JSON \emph{bundle} as an extra file inside the same archive; a readable copy of the bundle is written next to it. The bundle (format version 1) contains the model configuration, class names, thresholds, normalisation statistics, feature names, the feature selection and the graph-window settings. Constants in the model class make TorchScript skip the branches that are not used by a given layer type (for example, passing edge attributes to GCN), which allows all variants to be exported. After saving, the file is loaded again and compared with the eager model on the first 100 test graphs, and the export fails if the maximum difference of the outputs exceeds $10^{-4}$.
+
+\section{Inference Engine}
+The \texttt{InferenceEngine} loads the exported file and the bundle, and applies the model to a table of flow records. A call takes four steps whose times are measured separately: (1) \emph{features}: node and edge features are computed for each chunk of at most 200 records; (2) \emph{graph}: the chunks are combined into a single batch of tensors with offsets, and the features are transformed and standardised; (3) \emph{model}: one forward pass for the whole batch; (4) \emph{decision}: the chunk with the highest attack probability gives the confidence and the type; the node scores are averaged per IP address across chunks; hosts above the node threshold are listed; the three most frequent destinations of the flagged hosts are taken as the victims, and the number of flows per flagged host is counted (used by the heavy-hitter rule). At start-up the engine runs five synthetic windows to complete the profiling of TorchScript. The device is chosen automatically (CUDA if available).
+
+\section{Flow Collector}
+The collector is a thread-safe ordered dictionary from the 5-tuple (source, destination, protocol, source port, destination port) to a state object that stores the latest cumulative statistics, the time of first appearance, the time of last activity and the packet count last reported by each switch. For each entry of a poll: if the flow is new it is added; otherwise its activity time is updated if the packet count of that switch changed (or if the switch is reporting for the first time, or the counter has restarted because a rule was reinstalled), and the stored entry is replaced by the one with the highest packet count, so that a flow that crosses two switches is counted once and with the busiest switch's counters. Flows whose last activity is older than the window length are evicted, and the oldest flows are removed if the table exceeds 50,000 entries. Entries without IPv4 addresses (table-miss, ARP and IDS rules) are ignored.
+
+\section{Controller Application}
+The os-ken application implements the following functions.
+\begin{itemize}
+	\item \textbf{Switch connection.} On connection, table~0 receives a default entry that continues to table~1, and table~1 receives a table-miss entry that sends packets to the controller. If IDS rules are already active when a switch connects (for example, after a restart of the switch), they are installed on it.
+	\item \textbf{Forwarding.} For each packet-in the controller learns the source MAC address, selects the output port and, for IPv4 packets, installs a forwarding entry in table~1 that matches the 5-tuple (or, in \texttt{host\_pair} mode, source, destination, protocol and destination port) with a 30-second idle timeout. This gives each flow its own counters.
+	\item \textbf{Polling.} A green thread sends a flow-statistics request for table~1 to every switch, waits half the polling interval for the replies, posts the collected entries (and the cookies of removed rules) to the IDS as JSON, and sleeps for the other half. Entries with priority 0 and those carrying the IDS cookie tag are not reported.
+	\item \textbf{Flow-removed events.} When a forwarding entry expires, its final counters are reported, so that short flows are not lost. When an IDS rule is removed from a switch, the controller deletes the switch from the set of holders of that rule; when the set is empty the rule's cookie is reported as removed to the IDS.
+	\item \textbf{Rule installation.} The response of the IDS contains the actions. For \texttt{add}, a drop rule is an entry in table~0 with no instructions; a rate limit first installs a meter (identifier derived from the cookie, packets-per-second flag, one drop band at the given rate with a burst of one tenth of the rate) and then an entry with the instructions ``meter'' and ``go to table 1''. Rules carry a cookie that contains a fixed tag in the upper 16 bits, so the controller can recognise them. For \texttt{delete}, the entry is deleted by cookie from table~0 and the meter is removed.
+	\item \textbf{Fail-open.} A failed HTTP call to the IDS (timeout of 5 seconds) logs a warning and nothing else.
+\end{itemize}
+Configuration is through environment variables (IDS address, API key, polling interval, match mode, idle timeout of forwarding entries, drop instead of meters). A small launcher script provides the missing \texttt{osken-manager} entry point.
+
+\section{Mitigation Engine}
+The engine keeps a dictionary of active rules and an outbox of actions. Its \texttt{handle} function is called with each decision, ignores everything except ATTACK decisions that are confirmed, and \emph{creates} rules: it first expires the rules whose timeout has passed, then selects targets (one rate-limit rule for the victim and drop rules for heavy hitters in the spoofed-DDoS case, otherwise one rule for each new attacker), skips whitelisted addresses and addresses for which an identical rule exists, enforces a maximum number of rules, and appends the actions to the outbox. The priority of a rule is the base priority minus 100 for a source rate limit and minus 200 for victim protection; the isolation action is sent as a drop. Rules are numbered by a counter that also serves as their cookie. Every addition, removal and expiry is written as one line of JSON to the audit log. Manual block and unblock functions create and remove rules in the same way with the source set to ``manual''. The controller's removal reports (\texttt{forget\_cookies}) make the engine forget rules that the switches have removed.
+
+\section{IDS Service and Dashboard}
+The \texttt{IDSService} class connects the collector, the engine, the classifier and the mitigation engine, and implements the function \texttt{process\_flows} that is called for each upload: ingest the entries, take the window, predict, classify, create the rules, collect the actions, store the alert and latency, publish an event and return the summary. A bounded list of recent events feeds the server-sent-event stream. The service also builds a topology summary for the live page (hosts and at most 300 links, coloured by attacker score).\\
+
+The FastAPI application (\texttt{web/app.py}) serves the static pages and the JSON endpoints of Table~\ref{tab:api}. The offline page reads the result files (baselines, GNN, ablations, feature selection) and draws tables and charts in the browser; the live page draws the traffic graph, lists alerts and rules, shows the latency and provides block and unblock buttons; the pipeline page shows the stage and the progress of a \texttt{run\_all.sh} execution, read from a status file. The API key is read from the environment variable \texttt{IDS\_API\_KEY}; if it is set, the upload and the manual-control endpoints return HTTP 401 without the header \texttt{X-API-Key}. Further environment variables select the configuration file, the allowed origins, the log directory, the recording of all flow statistics to a CSV file (used to collect labelled laboratory data) and a detect-only mode that never installs rules.
+
+\section{Laboratory Implementation}
+\textbf{Topology.} Two Open vSwitch switches (OpenFlow 1.3) are joined by a 100~Mbit/s link and connected to a remote controller on port 6653. Table~\ref{tab:hosts} lists the six hosts.
+
+\begin{table}[htbp]
+\centering
+\caption{Hosts of the laboratory topology}
+\label{tab:hosts}
+\begin{tabular}{|c|c|c|l|}
+\hline
+\textbf{Host} & \textbf{IP address} & \textbf{Switch} & \textbf{Role} \\ \hline
+h1 & 10.0.0.1 & s1 & Attacker (DoS source and one of the DDoS sources) \\ \hline
+h2 & 10.0.0.2 & s1 & Benign client (iperf3 client) \\ \hline
+h3 & 10.0.0.3 & s1 & Benign client (ping) \\ \hline
+h4 & 10.0.0.4 & s2 & Web server and victim \\ \hline
+h5 & 10.0.0.5 & s2 & Benign client; iperf3 server \\ \hline
+h6 & 10.0.0.6 & s2 & Attacker \\ \hline
+\end{tabular}
+\end{table}
+
+\textbf{Scenarios.} The script that runs a scenario starts the network, starts the benign traffic (an HTTP server on the victim, an iperf3 server, clients that request the web page every 0.5 to 2.5 seconds, a 2~Mbit/s iperf3 stream and a ping stream), waits for the warm-up, launches the attack command on the attacker hosts, stops it after the configured duration, waits for the cool-down and writes the ground-truth JSON. The attack commands are a SYN flood with random sources (\texttt{hping3 -S -p 80 --rand-source}) from both attackers for DDoS, a SYN flood from h1 for DoS, a repeated SYN scan of ports 1--2000 for Probe, and repeated HTTP requests with random passwords for BruteForce. The packet interval of the floods is configurable (default 2~ms, i.e., about 500 packets/s per attacker) and can be varied between runs to give the training data more variety. The script can repeat a scenario several times (the live evaluation used three repetitions of each scenario) and cleans up all background processes at the end of each run.\\
+
+\textbf{Analysis.} The mitigation analysis script reads the ground truth, the pcap file of the victim link and the audit log. It finds the first rule that matches an attacker (or the victim for a spoofed flood) after the start of the attack, computes the time to mitigation, counts the packets per second of attack traffic and of benign traffic before and after that moment, calculates the drop rate, and lists every rule whose match is a benign address as a false block. For benign-only runs, any rule counts as false. A separate script labels the recorded flows as described in Appendix~D and builds graph files for fine-tuning and evaluation.
+
+\textbf{Container.} The Docker image is based on Ubuntu 22.04 and installs Mininet, Open vSwitch, os-ken 2.8.1, hping3, nmap, iperf3 and tcpdump; its entry script starts Open vSwitch. The container is started with \texttt{--privileged} and \texttt{--network host} and mounts the repository. The demo script generates an API key, starts the IDS on the host, runs the scenario in the container, then performs the analysis and the evaluation on the host.
+
+\section{Automated Tests}
+The 45 automated tests are summarised in Table~\ref{tab:tests}. They run in about 11 seconds on the development machine and do not need Mininet or a GPU.
+
+\begin{longtable}{|p{4.0cm}|c|p{8.4cm}|}
+\caption{Automated tests}\label{tab:tests}\\
+\hline
+\textbf{File} & \textbf{Tests} & \textbf{What is checked} \\ \hline
+\endfirsthead
+\hline \textbf{File} & \textbf{Tests} & \textbf{What is checked} \\ \hline
+\endhead
+\texttt{test\_preprocessing.py} & 19 & Label mapping for nine example labels including the unknown one; binary label; cleaning keeps the attack type; mixed timestamp formats; records of both directions; server-first rows are normalised; shapes and values of the features; ICMP has no port buckets; conversion of OpenFlow statistics; chronological split with a gap; split of graphs by window metadata \\ \hline
+\texttt{test\_graph\_builder\_v2.py} & 3 & Labels of windows and nodes; no flow is shared between splits; the overlay mixes benign hosts into attack windows \\ \hline
+\texttt{test\_feature\_selection.py} & 2 & A feature subset is cut without changing the original graphs; the engine serves a model trained on selected columns \\ \hline
+\texttt{test\_live\_path.py} & 17 & Collector de-duplicates switches and tracks activity; non-IP entries are ignored; classifier levels, whitelist, cool-down and persistence; mitigation policy, duplicates and unblock; spoofed DDoS limits the victim, waits for confirmation and still blocks heavy hitters; suspicious decisions are only logged; rules expire; large windows are chunked; the host score is the mean over chunks; service round trip; API upload and authentication; manual block and unblock; rule priorities by severity \\ \hline
+\texttt{test\_mininet\_tools.py} & 4 & Labelled graphs are built from laboratory flows; the drop rate is computed correctly; false blocks are detected; any rule in a benign run counts as false \\ \hline
+\end{longtable}

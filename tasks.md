@@ -1,0 +1,1 @@
+[*]pca and other feature reduction algorithmns check multiple and do comaprision and select the best
