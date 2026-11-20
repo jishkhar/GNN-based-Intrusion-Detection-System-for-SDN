@@ -16,7 +16,7 @@ from torch_geometric.loader import DataLoader
 
 from common.config import parse_args_with_config, run_metadata
 from models.gnn_v2 import MultiTaskGNN
-from preprocessing.graph_dataset import GraphFeatureStats, apply_stats_to_graphs
+from preprocessing.graph_dataset import GraphFeatureStats, apply_stats_to_graphs, select_graph_features
 
 BUNDLE_NAME = "ids_bundle.json"
 
@@ -37,6 +37,7 @@ def make_bundle(ckpt: dict, metadata: dict | None = None) -> dict:
         "feature_stats": ckpt["feature_stats"],
         "node_feature_names": ckpt["node_feature_names"],
         "edge_feature_names": ckpt["edge_feature_names"],
+        "feature_selection": ckpt.get("feature_selection"),
         "graph_meta": ckpt.get("graph_meta", {}),
         "export": metadata or {},
     }
@@ -50,8 +51,9 @@ def load_exported(path: str, device: str = "cpu") -> tuple[torch.jit.ScriptModul
 
 
 @torch.no_grad()
-def verify(eager: MultiTaskGNN, scripted, graph_path: str, stats: GraphFeatureStats, n: int = 100) -> float:
-    graphs = torch.load(graph_path, weights_only=False)["test"][:n]
+def verify(eager: MultiTaskGNN, scripted, graph_path: str, stats: GraphFeatureStats, n: int = 100,
+           selection: dict | None = None) -> float:
+    graphs = select_graph_features(torch.load(graph_path, weights_only=False)["test"][:n], selection)
     graphs = apply_stats_to_graphs(graphs, stats)
     max_diff = 0.0
     for batch in DataLoader(graphs, batch_size=1, exclude_keys=["node_ips"]):
@@ -74,7 +76,7 @@ def run(checkpoint_path: str, output_path: str, graph_path: str | None = None, m
     reloaded, _ = load_exported(output_path)
     if graph_path:
         stats = GraphFeatureStats.from_dict(bundle["feature_stats"])
-        diff = verify(eager, reloaded, graph_path, stats)
+        diff = verify(eager, reloaded, graph_path, stats, selection=bundle["feature_selection"])
         print(f"Max |eager - torchscript| over 100 test graphs: {diff:.2e}")
         if diff > 1e-4:
             raise RuntimeError(f"Exported model deviates from eager model (max diff {diff})")

@@ -155,6 +155,12 @@ async def get_phase2_metrics():
     return out
 
 
+@app.get("/api/feature-selection")
+async def get_feature_selection():
+    """Comparison of feature selection / reduction methods (preprocessing.feature_selection)."""
+    return _read_json(PHASE2_RESULTS_DIR / "feature_selection.json")
+
+
 @app.get("/api/summary")
 async def get_summary():
     try:

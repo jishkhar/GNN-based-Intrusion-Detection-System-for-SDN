@@ -33,6 +33,9 @@
       <a href="#comparison"  class="ids-nav-link" data-section="comparison">
         <i class="bi bi-bar-chart-grouped"></i> Comparison
       </a>
+      <a href="#featsel"     class="ids-nav-link" data-section="featsel">
+        <i class="bi bi-funnel"></i> Feature Selection
+      </a>
       <a href="#analysis"    class="ids-nav-link" data-section="analysis">
         <i class="bi bi-pie-chart"></i> Analysis
       </a>
@@ -292,6 +295,54 @@
         </div>
       </section>
 
+      <!-- ── FEATURE SELECTION ───────────────────── -->
+      <section id="featsel" class="ids-section">
+        <div class="ids-section-label">Feature Selection &amp; Reduction</div>
+        <div id="fsEmpty" class="ids-hint" hidden>
+          <i class="bi bi-terminal"></i>
+          <span>No comparison yet. Run <code>python -m preprocessing.feature_selection --config configs/phase2.yaml</code>.</span>
+        </div>
+        <div id="fsBody" hidden>
+          <div class="ids-card-row">
+            <div class="ids-card">
+              <div class="ids-card-header"><i class="bi bi-trophy"></i> Selected for flow (edge) features</div>
+              <dl class="ids-dl" id="fsBestEdge"></dl>
+            </div>
+            <div class="ids-card">
+              <div class="ids-card-header"><i class="bi bi-trophy"></i> Selected for host (node) features</div>
+              <dl class="ids-dl" id="fsBestNode"></dl>
+            </div>
+          </div>
+          <div class="ids-card-row">
+            <div class="ids-card">
+              <div class="ids-card-header"><i class="bi bi-graph-up"></i> Flow features: validation F1 vs. number of features</div>
+              <canvas id="fsEdgeLine" class="ids-canvas"></canvas>
+            </div>
+            <div class="ids-card">
+              <div class="ids-card-header"><i class="bi bi-graph-up"></i> Host features: validation F1 vs. number of features</div>
+              <canvas id="fsNodeLine" class="ids-canvas"></canvas>
+            </div>
+          </div>
+          <div class="ids-card-row">
+            <div class="ids-card">
+              <div class="ids-card-header"><i class="bi bi-bar-chart"></i> Flow features: best per method (validation vs. test F1)</div>
+              <canvas id="fsEdgeBar" class="ids-canvas"></canvas>
+            </div>
+            <div class="ids-card">
+              <div class="ids-card-header"><i class="bi bi-bar-chart"></i> Host features: best per method (validation vs. test F1)</div>
+              <canvas id="fsNodeBar" class="ids-canvas"></canvas>
+            </div>
+          </div>
+          <div class="ids-hint">
+            <i class="bi bi-lightbulb"></i>
+            Every method is fitted on the training split only and scored with the same Random Forest. The winner has the best
+            <strong>validation</strong> F1; among methods within <span id="fsTol">0.5</span> points of the best, the one using the fewest
+            features wins. Test F1 is shown for reference and never used to choose. <strong>PCA / SVD / ICA</strong> build new
+            components (all original features are still needed to compute them); the others keep a subset of the original features.
+          </div>
+        </div>
+      </section>
+
       <!-- ── ANALYSIS ───────────────────────────── -->
       <section id="analysis" class="ids-section">
         <div class="ids-section-label">Detailed Analysis</div>
@@ -381,5 +432,6 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="/static/js/app.js"></script>
+<script src="/static/js/featsel.js"></script>
 </body>
 </html>

@@ -82,7 +82,7 @@ STAGES=(
   "dashboard|Start the dashboard|Web app on :$PORT: offline results, live IDS and this progress page|"
   "phase1|Phase 1: binary GNN on CICIDS2017|Clean, RF/XGBoost baselines, 5 s graph snapshots, edge-aware GAT, evaluation|results/baseline_metrics.json,results/gnn_metrics.json,results/gnn_classification_report.json,results/gnn_confusion_matrix.png"
   "clean_insdn|Phase 2: clean InSDN|Keeps the attack type and maps InSDN 'Normal' to benign|data/insdn/cleaned/cleaning_report.json"
-  "phase2_train|Phase 2: graphs, baselines, GNN, export|Host graphs with OpenFlow features, fair RF/XGBoost baselines, multi-task GAT$([[ $QUICK == 1 ]] || echo ', ablations'), TorchScript export|data/graphs/insdn_v2.pt,results/phase2/baselines_v2.json,results/phase2/gnn_v2_gat.json,models/gat_ids_insdn_only.pt,models/gat_ids.pt"
+  "phase2_train|Phase 2: graphs, baselines, GNN, export|Host graphs with OpenFlow features, fair RF/XGBoost baselines, multi-task GAT$([[ $QUICK == 1 ]] || echo ', ablations'), TorchScript export|data/graphs/insdn_v2.pt,results/phase2/feature_selection.json,results/phase2/baselines_v2.json,results/phase2/gnn_v2_gat.json,models/gat_ids_insdn_only.pt,models/gat_ids.pt"
   "tests|Tests|pytest: preprocessing, graph builder, Mininet tools, full live path|"
   "replay|Replay through the live IDS|Held-out InSDN flows sent to the running IDS as OpenFlow stats every 2 s (watch /live)|results/phase2/replay_report.json"
   "latency|Latency benchmark|GNN inference time per window size, CPU and GPU|results/phase2/latency_report.json,results/phase2/latency_histogram.png"

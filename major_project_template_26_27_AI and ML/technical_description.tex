@@ -1,0 +1,113 @@
+%%  Technical Chapters
+
+
+%%%%%%% Note : The below mentioned chapters, sections and subsections are given in general.
+
+%%% Only appropriate and necessary chapters, sections and subsections are to be included
+\chapter{System Overview and Requirements}
+
+The main body of the report may be divided into multiple chapters as the case may be. The organization of the report is problem specific. There may be separate Chapters for  System Overview, design methodology, or experimental methodology, Hardware Description or Software Description\\
+
+\section{May be Block Diagram}
+
+\textbf{Use of figures:} The cliche "a picture is worth a thousand words" is appropriate here. Spend time thinking about pictures. Wherever necessary, explain all aspects of a figure (ideally, this should be easy), and do not leave the reader wondering as to what the connection between the figure and the text is.
+
+
+Further illustrations on how to refer Figure, Equations, Table and References.
+
+\section{Refering Figure} 
+This section illustrates, how to refer Figure.\\
+
+\begin{figure}[h]
+\centering
+\includegraphics[scale=1.0]{Logo}
+\caption{The SIT Logo.}
+\label{fig:Logo}
+\end{figure}
+ 
+The SIT Logo is shown in Figure \ref{fig:Logo}.
+
+\section{Referring Equations}
+This section illustrates, how to refer Equations.
+
+This is how equation $$ F = ma $$ is centered and not referred.
+
+To get equation in the same line, use this $ z^2 = x^2 + y^2$ which is called Pythagorous Equation.
+
+
+\begin{equation} 
+\label{eq:ohm}
+V=IR
+\end{equation}
+
+where,\\ $V=voltage,\\ I=current $ and $\\ R=resistance $ \\
+The equation \ref{eq:ohm} is a called Ohm's equation.
+
+%% to move to next/new page
+
+\section{Referring Table}
+This section illustrates, how to refer Table.
+
+\begin{table}[h]
+\centering
+\caption{My Table}
+\label{tab:RC}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{Sl. No.} & \textbf{Heading 1} & \textbf{Heading 2} & \textbf{Heading 3} \\ \hline
+\textit{1}       & { \underline{R1/C1}}        & R1/C2              & R1/C3              \\ \hline
+\textit{2}       & R2/C1              & { \underline{R2/C2}}        & R2/C3              \\ \hline
+\textit{3}       & R3/C1              & R3/C2              & { \underline{R3/C3}}        \\ \hline
+\end{tabular}
+\end{table}
+
+The Table \ref{tab:RC} shows \textbf{Bold}, \textit{Italic} and \underline{underlined} fonts. \\
+Can also visit "http://www.tablesgenerator.com/", to generate table online.
+
+\section{Requirements}
+\subsection{Functional Requirements}
+Write a detailed functional requirements of the project along with use case diagram.
+\subsection{Non-functional Requirements}
+Write a detailed non-functional requirements of the project.
+
+%% new chapter
+
+%% new chapter
+
+\chapter{System Architecture and High Level Design}
+The technical section is the most  work-specific, and hence is the least described here.\\
+\textbf{Terminology: }Define each term/symbol before you use it, or right after its first use. Stick to a common terminology throughout the report. \\
+
+\section{About Component 1}
+
+\subsection{More Details}
+
+\section{About Component 2}
+
+\section{About Component 3}
+
+The list goes on.
+
+
+%% new chapter
+
+\section{About Software Requirements}
+
+
+
+\chapter{Low Level Design}
+Only project specific designs, each design with Figure captions to be mentioned in the descriptions. All your project specific models representing system and software components, interfaces, communications, functionalities and behaviors only should be covered. NOT GENERIC EXPLANATIONS AND DESIGNS ARE ALLOWED\\
+Include Class Diagrams, CRC cards, Sequence Diagrams, Activity Diagrams, State Diagrams, Component Diagrams, Deployment diagrams, Communication Diagrams, Object diagrams  for detailed design. Ensure Mapping between DESIGN AND its relevance with requirements given under section Functional and Non functional requirement is taken care of.  
+NO GENERIC DIAGRAMS ARE ALLOWED
+
+\section{About Algorithm}
+Pseudocode / Algorithms used in your project work only shall be given in detail. 
+NO GENERIC ALGORITHMS ARE ALLOWED
+
+\section{About Flowchart}
+Include the CFD (Context Flow Diagram), DFD (Data Flow Diagram)s specific to your project work only. 
+NO GENERIC FLOWCHARTS ARE ALLOWED
+
+The list goes on.\\[2.0cm]
+Don't include codes here.\\[2.0cm]
+\textbf{{\large Note : Subsequent Technical Chapters can be added in this file.}}

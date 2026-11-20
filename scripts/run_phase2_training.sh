@@ -13,6 +13,9 @@ mkdir -p "$OUT" models/checkpoints
 echo "[1/5] Building InSDN topology graphs"
 $PY -m preprocessing.graph_builder_v2 --config "$CONFIG"
 
+echo "[1b/5] Feature selection: compare PCA and other methods, pick the best"
+$PY -m preprocessing.feature_selection --config "$CONFIG"
+
 echo "[2/5] Baselines (RF / XGBoost) on the same features and split"
 $PY -m baselines.train_baselines_v2 --config "$CONFIG"
 
@@ -26,6 +29,10 @@ if [[ "${1:-}" != "--skip-ablations" ]]; then
       --checkpoint-path "models/checkpoints/gnn_v2_${conv}.pt" \
       --metrics-path "$OUT/ablation_${conv}.json" --scores-out "" --curves-path ""
   done
+  # Same model on all 16+16 features, to show what the feature selection changes.
+  $PY -m models.train_gnn_v2 --config "$CONFIG" --no-feature-selection \
+    --checkpoint-path models/checkpoints/gnn_v2_gat_allfeatures.pt \
+    --metrics-path "$OUT/ablation_gat_allfeatures.json" --scores-out "" --curves-path ""
   $PY -m models.train_gnn_v2 --config "$CONFIG" --no-edge-features \
     --checkpoint-path models/checkpoints/gnn_v2_gat_noedge.pt \
     --metrics-path "$OUT/ablation_gat_noedge.json" --scores-out "" --curves-path ""

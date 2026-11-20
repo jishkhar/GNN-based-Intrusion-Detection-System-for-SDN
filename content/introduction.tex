@@ -1,0 +1,137 @@
+\chapter{Introduction}
+
+Computer networks carry the services on which education, commerce, healthcare and government now depend, and the number and size of attacks against them keeps growing. Software-Defined Networking (SDN) is one of the main architectural changes of the last decade: it separates the \emph{control plane}, which decides how traffic is forwarded, from the \emph{data plane}, which forwards it, and places the control logic in a programmable controller that talks to the switches through the OpenFlow protocol \cite{bib:openflow, bib:kreutz}. A controller sees every switch and every flow, so in principle it is the ideal place to detect and stop attacks. The same centralisation is also a weakness: flooding the controller or the flow tables of its switches can disable the entire network \cite{bib:yan}.\\
+
+Most machine-learning intrusion detection systems (IDS) treat each network flow as an independent row of numerical features and classify it with a Random Forest, XGBoost or a neural network. This ignores the structure of the traffic. A DDoS attack with spoofed addresses is nothing but many tiny flows from many sources into one destination, a port scan is one source reaching many ports of one target, and a brute-force attack is one source repeating the same connection. Each of these is easy to recognise as a \emph{shape} on a graph of hosts and flows, but hard to recognise from a single flow. Graph Neural Networks (GNNs) \cite{bib:scarselli, bib:gnnreview} learn directly from such graphs, and recent work has shown their value for network intrusion detection \cite{bib:egraphsage, bib:anomale}.\\
+
+This project builds a complete SDN intrusion detection and mitigation system around a GNN. In the proposed solution, the flow statistics that an OpenFlow switch reports are grouped into short windows, each window is converted into a directed graph (hosts are nodes and flows are edges), and a multi-task Graph Attention Network \cite{bib:gat} predicts (a) the attack type of the window and (b) an attacker score for every host. A mitigation engine converts these predictions into OpenFlow drop and rate-limit rules, which the controller installs on the switches. The methodology followed is: study the datasets and the OpenFlow constraints, design a feature schema that the switch can really produce, build and validate the graph pipeline, train and compare the GNN against tabular baselines under a leakage-free split, export the model for low-latency inference, integrate it with an os-ken controller and a Mininet network, and evaluate detection and mitigation in the live laboratory.
+
+
+\section{Background}
+
+\subsection{Software-Defined Networking and OpenFlow}
+In a traditional network every switch and router contains both the hardware that forwards packets and the software that decides where to forward them. SDN removes the decision logic from the devices and places it in a controller. The controller communicates with the switches through a southbound protocol, of which OpenFlow \cite{bib:openflow} is the best known. An OpenFlow switch keeps one or more \emph{flow tables}. A flow entry consists of match fields (for example source and destination IP address, protocol, TCP/UDP ports), a priority, counters (packets, bytes, duration), timeouts, and instructions (forward, drop, send to the next table, apply a meter). When a packet matches no entry it is sent to the controller in a \emph{packet-in} message, and the controller answers by installing a flow entry (a \emph{flow-mod}). The controller can also request the counters of all entries at any time with a flow-statistics request. Two features of OpenFlow 1.3 are used heavily in this project: \emph{flow statistics}, because they are the only observations that a switch can report, and \emph{meters}, because they allow a rule to limit a flow to a number of packets per second instead of dropping it.
+
+\subsection{Network Intrusion Detection}
+An intrusion detection system observes network activity and raises alerts about malicious behaviour. \emph{Signature-based} systems compare traffic with patterns of known attacks, and cannot recognise new attacks. \emph{Anomaly-based} systems learn what normal traffic looks like and flag deviations, which gives many false alarms. \emph{Supervised} machine-learning systems, such as the one built here, learn from labelled examples of normal and malicious traffic. The attacks that matter most for an SDN, and that are covered by the data used in this project, are:
+\begin{itemize}
+	\item \textbf{Denial of Service (DoS):} one source floods a victim with requests (for example TCP SYN packets) to exhaust its resources.
+	\item \textbf{Distributed Denial of Service (DDoS):} many sources, often with spoofed addresses, flood one victim.
+	\item \textbf{Probe (port scan):} one source contacts many ports or hosts to discover running services.
+	\item \textbf{Brute force:} one source repeats login attempts to guess credentials.
+	\item \textbf{Web attacks, Botnet and User-to-Root (U2R):} application-level attacks, communication of compromised hosts with a controller, and privilege escalation; they are rare in the dataset.
+\end{itemize}
+
+\subsection{Graphs and Graph Neural Networks}
+A graph $G=(V,E)$ consists of nodes $V$ and edges $E$. Network traffic is naturally a graph: hosts are nodes, flows are edges, and the features of a flow (packets, bytes, duration) are edge features. A Graph Neural Network computes a representation of every node by repeatedly combining its own representation with those of its neighbours, a process called message passing \cite{bib:mpnn}:
+\begin{equation}
+h_v^{(l+1)}=\phi\Big(h_v^{(l)},\;\bigoplus_{u\in\mathcal{N}(v)}\psi\big(h_u^{(l)},h_v^{(l)},e_{uv}\big)\Big),
+\label{eq:mp}
+\end{equation}
+where $\psi$ builds a message from a neighbour $u$ and the edge $e_{uv}$, $\bigoplus$ is a permutation-invariant aggregation (sum, mean, attention-weighted sum) and $\phi$ updates the node. After $L$ layers the representation of a node depends on its $L$-hop neighbourhood, so a host that receives flows from 100 distinct sources \emph{looks different} from one that receives flows from a single source, even if every individual flow is identical. A pooling operation over all nodes (mean, maximum) gives a representation of the whole graph, which can be used to classify the window.
+
+\section{Motivation}
+
+Several observations motivated the choice of this project.
+
+\begin{itemize}
+	\item \textbf{SDN concentrates risk.} A single controller manages the whole network, so an attack that is not stopped quickly can degrade every host behind it. Manual response by an administrator takes minutes, whereas a flood takes seconds.
+	\item \textbf{Flow-level classifiers miss coordinated behaviour.} Per-flow models cannot see that thousands of one-packet flows share one victim, or that one host has touched hundreds of ports. The relationships between hosts are exactly what a graph captures.
+	\item \textbf{Offline accuracy does not imply deployability.} Many published IDS models report F1-scores above 99\% using dozens of CICFlowMeter statistics, such as inter-arrival times and flag counts, that an OpenFlow switch does not report. We wanted a system whose offline features and live features are identical, so that the reported numbers mean something in a real SDN.
+	\item \textbf{Detection alone is not protection.} Many research prototypes stop at a classification report. A complete solution must also decide \emph{whom} to block, install the rule on the switch, avoid blocking innocent hosts, and remove the rule later.
+	\item \textbf{Evaluation pitfalls are common.} Overlapping sliding windows, mislabelled flow directions and the absence of real topology information (the \texttt{MachineLearningCVE} version of CICIDS2017 has no IP addresses) can inflate results. We wanted to find and correct such problems rather than inherit them.
+\end{itemize}
+
+
+\section{Problem Statement}
+Given the flow statistics reported by the OpenFlow switches of an SDN, the problem is to decide, within seconds and for every short time window, (i) whether the network is under attack, (ii) which kind of attack it is, and (iii) which hosts are responsible, and then to install forwarding rules that stop the attack without disrupting benign hosts. The solution must satisfy four constraints that are often ignored in the literature: it may use only features that an OpenFlow switch reports; it must be evaluated on data split in time so that no information leaks from training to test; it must run fast enough for real-time use (below 50~ms per window); and it must be tested against real attack traffic in a running SDN, measuring both the attack traffic that was stopped and the benign traffic that was harmed.
+
+
+\section{Challenges Addressed}
+Building a deployable detector for an SDN raises several challenges, and the project is organised around solving them.
+\begin{enumerate}
+	\item \textbf{Representation.} How to turn a stream of flow statistics into a graph that exposes coordinated behaviour, with node and edge features that a switch can report. \emph{Solution:} windowed host graphs and the OpenFlow-only feature schema (Chapter~4).
+	\item \textbf{Label quality.} Public datasets label flows by capture period, so the victim often appears as the sender of attack flows, and benign traffic is recorded separately from attacks. \emph{Solution:} direction normalisation and benign overlay (Chapter~4).
+	\item \textbf{Honest evaluation.} Overlapping windows leak between random splits, and rare classes have a handful of samples. \emph{Solution:} time-ordered split with a gap, and the major-class macro-F1 (Chapters~4 and~7).
+	\item \textbf{Class imbalance.} DDoS and DoS dominate while WebAttack, Botnet and Other are tiny. \emph{Solution:} class-weighted loss, reporting of per-class results, and discussion of the limits (Chapters~6 and~7).
+	\item \textbf{Real-time operation.} The decision must be taken in milliseconds on a laptop-class machine. \emph{Solution:} a small model, TorchScript, chunking, warm-up (Chapters~4 and~7).
+	\item \textbf{Whom to block.} A window label is not enough to install a rule. \emph{Solution:} the node head, mean host scores and persistence (Chapter~4).
+	\item \textbf{Spoofed sources.} Blocking addresses is useless when there is one address per packet. \emph{Solution:} destination-based rate limiting with meters, and heavy-hitter blocking (Chapter~4).
+	\item \textbf{Safety.} An automatic blocker can cause an outage by itself. \emph{Solution:} whitelist, confirmation, cool-down, expiry, priorities, fail-open and audit log (Chapters~4 and~5).
+	\item \textbf{Transfer to a real SDN.} A model trained on a public capture failed on laboratory traffic. \emph{Solution:} fine-tuning with labelled laboratory runs (Chapter~7).
+\end{enumerate}
+
+
+\section{Objective of the project}
+
+The aim of the project is to \textbf{design and implement a graph-neural-network based intrusion detection and automated mitigation system for Software-Defined Networks that runs on real OpenFlow flow statistics}. The specific objectives are:
+
+\begin{enumerate}
+	\item To convert OpenFlow-compatible flow records into host-to-host graph windows with node and edge features that can be computed identically from datasets and from a live switch.
+	\item To train a multi-task GNN that outputs the attack type of each window (Benign, DDoS, DoS, Probe, BruteForce, WebAttack, Botnet, Other) and an attacker probability for each host.
+	\item To compare the GNN fairly with Random Forest and XGBoost baselines, and with GCN, GraphSAGE, no-edge-feature and window-size ablations, using a time-ordered split that avoids train/test leakage.
+	\item To compare feature-selection and dimensionality-reduction methods (ANOVA, mutual information, random-forest importance, L1, RFE, PCA, SVD, ICA) and select a compact feature set.
+	\item To achieve a model inference latency below 50~ms per window and a false-positive rate below 5\%.
+	\item To integrate the IDS with an os-ken controller and a Mininet/Open vSwitch network, so that attackers are identified and blocked or rate-limited automatically, and to measure the fraction of attack traffic dropped (target: at least 70\%).
+	\item To provide a web dashboard for offline results, live traffic graph, alerts, active rules and manual block/unblock.
+\end{enumerate}
+
+
+\section{Scope of the Work}
+\textbf{Within the scope} of the project are: detection and mitigation of volumetric and scanning attacks (DDoS, DoS, Probe, BruteForce) at the network layer using flow statistics; offline evaluation on the InSDN dataset; live evaluation in a Mininet network with Open vSwitch and an os-ken controller; a web dashboard; and the supporting tests and documentation.\\
+\textbf{Outside the scope} are: payload inspection and detection of attacks that differ only in packet content (web attacks, malware); attacks on the controller--switch channel itself; defence against adversarial evasion of the model; deployment on physical switches; and complete protection of legitimate clients during a spoofed DDoS (this needs SYN cookies or a proxy).
+
+\section{Application Scenarios}
+The same design can be used in several settings:
+\begin{itemize}
+	\item \textbf{Campus and enterprise SDN:} protection of servers (web, mail, authentication) against floods and scans coming from inside or outside the network.
+	\item \textbf{Data-centre and cloud networks:} tenant isolation, where a compromised virtual machine scanning the neighbours should be rate-limited or isolated within seconds.
+	\item \textbf{Smart-city and IoT networks:} gateways that aggregate many low-power devices; a botnet of compromised devices can be isolated by blocking the egress of the infected hosts.
+	\item \textbf{Teaching and research:} a complete, reproducible laboratory in which students can compare detection models and mitigation policies against real traffic.
+\end{itemize}
+
+\section{Research Questions}
+The project was guided by four questions, which are answered in Chapter~8.
+\begin{enumerate}
+	\item[\textbf{RQ1}] Can a GNN that uses only OpenFlow-reportable features detect and type attacks in SDN traffic at least as well as strong tabular baselines?
+	\item[\textbf{RQ2}] Does the graph structure help to identify the attacking \emph{hosts}, so that automatic blocking becomes possible?
+	\item[\textbf{RQ3}] Can the complete path from flow statistics to an installed rule run fast enough for real-time operation?
+	\item[\textbf{RQ4}] Does the offline performance carry over to a running SDN under attack, and which additional mechanisms are necessary for safe mitigation?
+\end{enumerate}
+
+\section{Proposed Solution and Methodology}
+The proposed solution is a closed loop of \emph{observe, decide, act}. It was developed in the following stages, which correspond to the thirty-week schedule of Appendix~A.
+\begin{enumerate}
+	\item \textbf{Study and requirements.} Literature on SDN security, GNNs and datasets; analysis of what OpenFlow can report; definition of the success metrics (F1, FPR, latency, attack traffic dropped).
+	\item \textbf{Data preparation.} Cleaning of the InSDN files; mapping of dataset labels to eight canonical classes; correction of flow directions; conversion of rows into OpenFlow-style flow records.
+	\item \textbf{Graph construction.} Windows of consecutive flows are turned into directed host graphs with 16 edge and 16 node features; benign traffic is overlaid on half of the attack windows; the data are split in time order with a gap.
+	\item \textbf{Model development.} Random Forest and XGBoost baselines; a multi-task Graph Attention Network with a graph head (attack type) and a node head (attacker); ablations and feature-selection comparison.
+	\item \textbf{Deployment path.} TorchScript export, an inference engine with chunking and warm-up, an alert classifier and a FastAPI service.
+	\item \textbf{SDN integration.} An os-ken controller that forwards traffic, polls flow statistics every two seconds, posts them to the IDS and installs the returned rules; a Mininet laboratory in Docker with scripted benign and attack traffic.
+	\item \textbf{Mitigation.} A policy per attack type with drop, meter-based rate limit and isolation actions, with whitelist, confirmation windows, priorities, timeouts and an audit log.
+	\item \textbf{Evaluation and refinement.} Offline metrics, replay of held-out flows, latency benchmarks and live attack runs; each problem found (domain shift, false blocks, ineffective meters, rule precedence) led to a design change that was then re-evaluated.
+\end{enumerate}
+
+\section{Major Contributions}
+\begin{itemize}
+	\item An \textbf{OpenFlow-compatible feature schema} that is shared by the dataset converter and the live controller, so the offline results describe the deployed system.
+	\item A \textbf{multi-task GAT} that gives the attack type of a window and an attacker score for each host, which is what automatic mitigation needs.
+	\item A \textbf{leakage-free evaluation protocol}: time-ordered split with a gap, direction normalisation of labels, benign overlay, and reporting of major-class macro-F1 next to all-class macro-F1.
+	\item A \textbf{comparison study} of three GNN layer types, edge features, three window sizes and eight feature-selection and reduction methods against Random Forest and XGBoost.
+	\item A \textbf{complete mitigation loop} on a real OpenFlow data plane, with measured results (94.7\% of attack traffic dropped, no benign host blocked, 12 of 12 runs) and a documented account of the design faults found and corrected.
+	\item A \textbf{reproducible, tested code base} with a dashboard, YAML configuration, pinned dependencies, a Docker laboratory and 45 automated tests.
+\end{itemize}
+
+\section{Organisation of the report}
+This project report is presented in eight chapters followed by the bibliography and appendices.
+\begin{itemize}
+	\item \textbf{Chapter 1 -- Introduction} states the problem, motivation, objectives and the organisation of the report.
+	\item \textbf{Chapter 2 -- Literature Survey} reviews SDN security, machine-learning and deep-learning intrusion detection, graph neural networks for intrusion detection, and the datasets, and summarises the gaps this project addresses.
+	\item \textbf{Chapter 3 -- System Overview and Requirements} gives the system overview, the problem formulation and the functional and non-functional requirements.
+	\item \textbf{Chapter 4 -- System Architecture and High Level Design} describes each component of the architecture, the data pipeline, the model, the controller integration, the mitigation engine and the software requirements.
+	\item \textbf{Chapter 5 -- Low Level Design} presents the class and sequence designs, the algorithms and the data flow diagrams specific to this project, and maps them to the requirements.
+	\item \textbf{Chapter 6 -- Implementation} describes how each module was implemented: data cleaning, graph construction, training, export, inference, controller, mitigation engine, dashboard and the laboratory.
+	\item \textbf{Chapter 7 -- Results} describes the test environment, test cases, the offline and live results and their analysis.
+	\item \textbf{Chapter 8 -- Conclusion} summarises the work, its limitations and the scope for future work.
+	\item The \textbf{Appendices} contain the project plan and budget, the SDG mapping, the self-assessment against POs/PSOs, the input details and the configuration details.
+\end{itemize}

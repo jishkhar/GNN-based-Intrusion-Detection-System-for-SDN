@@ -1,0 +1,115 @@
+\chapter{Conclusion}
+The project titled \textbf{``GNN-Based Intrusion Detection and Automated Mitigation for Software-Defined Networks''} was successfully implemented and tested, both offline on the InSDN dataset and live in an emulated SDN under real attack traffic. The work shows that treating the traffic of a time window as a host-to-host graph gives a detector that can say not only that an attack is happening, but also which hosts are responsible, and that this knowledge is sufficient to block the attack automatically at the switches.\\
+
+\section{Summary of the project work}
+The work started with a study of SDN security, graph neural networks and the available datasets. This showed that the common flow-level approaches do not use the relationships between hosts, that most models use features an OpenFlow switch cannot report, and that few systems are connected to a controller. The data work then produced a leakage-free pipeline: InSDN files were cleaned and mapped to eight classes (correcting a Phase~1 error that labelled all benign rows as attacks), flows were converted to OpenFlow-compatible records with 16 edge and 16 node features, flow directions were normalised so that victims are not labelled as attackers, and 17,780 graph windows were split in time order with a gap between the splits.\\
+
+A multi-task Graph Attention Network with edge features and bidirectional message passing was trained to predict the attack type of each window and the attacker probability of each host. It was compared with Random Forest and XGBoost under identical conditions, and with GCN, GraphSAGE, no-edge-feature and window-size ablations; eight feature-selection and reduction methods were compared as well. On the test split the GAT reached a window F1 of 0.9985 with no false positives, a major-class attack-type macro-F1 of 0.9785 (baselines: 0.970) and a host F1 of 0.9975 (baselines: 0.994--0.995). The model was exported as a single TorchScript bundle and served through a FastAPI service whose complete path takes 6.5~ms per window on a CPU.\\
+
+The IDS was then integrated with an os-ken controller and Open vSwitch in a Docker/Mininet laboratory. The controller pushes flow statistics every two seconds and installs the drop and meter-based rate-limit rules returned by the mitigation engine; a policy per attack type, whitelist, confirmation windows, rule priorities, timeouts and an audit log make the mitigation safe. The first live tests exposed three problems that offline metrics had hidden: a domain shift in benign traffic (solved by fine-tuning on lab traffic), benign hosts being blocked (solved by mean host scores and persistence) and ineffective rate limits and rule precedence (solved by packet-rate meters and priorities by severity). In the final system, all 12 live attack runs were mitigated, a mean of 94.7\% of the attack traffic was dropped, and no benign host was blocked. A web dashboard with offline results, a live monitor and a pipeline view completes the system, and an automated suite of 45 tests passes.
+
+
+\section{Objectives versus Outcomes}
+\begin{table}[htbp]
+\centering
+\caption{Achievement of the objectives of Chapter 1}
+\label{tab:objectives}
+\small
+\begin{tabularx}{\textwidth}{|c|p{5.2cm}|X|}
+\hline
+\textbf{No.} & \textbf{Objective} & \textbf{Outcome} \\ \hline
+1 & OpenFlow-compatible graph windows & Achieved: 16 edge and 16 node features from OpenFlow counters; 17,780 windows; one feature module for datasets and live path. \\ \hline
+2 & Multi-task GNN (attack type and attacker host) & Achieved: window F1 0.9985, major-class macro-F1 0.9785, host F1 0.9975; rare classes not learned. \\ \hline
+3 & Fair comparison with baselines and ablations & Achieved: identical features and time-ordered split; GCN, GraphSAGE, no-edge and window-size variants. Gain over the baselines is small. \\ \hline
+4 & Feature-selection comparison & Achieved: eight methods on both tables; a compact subset (8 edge and 4 node features) chosen and used for training. \\ \hline
+5 & Latency below 50~ms and FPR below 5\% & Achieved: p99 9.6~ms; FPR 0\% (InSDN) and 1.7\% (lab). \\ \hline
+6 & Live integration and at least 70\% of attack traffic dropped & Achieved for the traffic drop (94.7\%, 12/12 runs); the 100~ms reaction target was not reached (median 4.5~s). \\ \hline
+7 & Dashboard & Achieved: offline, live and pipeline pages with manual block/unblock. \\ \hline
+\end{tabularx}
+\end{table}
+
+\section{Lessons Learned}
+\begin{itemize}
+	\item \textbf{Evaluation design matters more than model design.} Correcting the split, the label direction and the benign class changed the numbers more than any change of the network, and the live runs revealed failures that no offline metric showed.
+	\item \textbf{A model is not a defence.} Most of the effort of the second half of the project went into the decision logic around the model (aggregation, persistence, rule priorities, meters, expiry), which decided whether the system helps or harms.
+	\item \textbf{Match the training data to the deployment.} A model trained on a public dataset needed a small amount of labelled local traffic; any real deployment should plan for a calibration phase.
+	\item \textbf{Strong baselines deserve respect.} Random Forest and XGBoost are within a few points of the GNN on this dataset; reporting the true size of the improvement is more useful than a claimed one.
+	\item \textbf{Record everything.} Writing the configuration, the git commit and the parameters into each result file made it possible to explain and reproduce every number.
+\end{itemize}
+
+\section{Impact of the Work}
+The project shows that an SDN controller can be turned into an automatic first responder: statistics that the switches already keep are enough to find and stop the common flooding and scanning attacks in seconds, without special hardware. The open code base, the laboratory image and the documented design decisions are intended to be reused by students and researchers, for example as a test bed for new detection models or mitigation policies.
+
+
+\section{Chapter-wise Summary}
+\begin{itemize}
+	\item \textbf{Chapter 1} introduced SDN and its security problem, the limits of flow-level detection, the objectives, the scope and the methodology.
+	\item \textbf{Chapter 2} surveyed SDN attacks, detection approaches, GNN layers, feature-selection methods and datasets, and identified four research gaps.
+	\item \textbf{Chapter 3} formulated the problem (host graphs, window and host labels, decision rules), collected the concepts and tools, and specified 13 functional and 10 non-functional requirements.
+	\item \textbf{Chapter 4} described the architecture: collector, feature builder, graph builder, multi-task GAT, alert classifier, mitigation engine and OpenFlow integration, together with the justification of 18 design decisions.
+	\item \textbf{Chapter 5} gave the low-level design: classes, sequence and state diagrams, seven algorithms, rule encoding, complexity and exceptional conditions.
+	\item \textbf{Chapter 6} documented the implementation of every module and the laboratory.
+	\item \textbf{Chapter 7} evaluated the system with 17 test cases: offline comparison, ablations, feature selection, latency, replay and 12 live attack runs.
+\end{itemize}
+
+\section{Answers to the Research Questions}
+\begin{description}
+	\item[RQ1] \textbf{Yes, but the margin is small.} With OpenFlow-only features the GAT reached window F1 0.9985 and major-class macro-F1 0.9785 against 0.9979 and 0.9703 for XGBoost, with no false positives. It is clearly better for DDoS and Probe, slightly worse for DoS and unable to learn the rare classes.
+	\item[RQ2] \textbf{Yes.} The node head identifies attacking hosts with F1 0.9975 (precision 0.998, recall 0.997) against 0.9946 for the best baseline that uses the same per-host features, and the identification is what makes automatic mitigation possible.
+	\item[RQ3] \textbf{Yes for the model, no for the whole loop.} The service path takes a median of 6.5--7.1~ms (99th percentile below 11~ms), but the time from the start of an attack to the rule is 4.5~s (median), limited by polling and confirmation.
+	\item[RQ4] \textbf{Only with additional mechanisms.} The InSDN-trained model did not transfer (window F1 0.69 on lab traffic) and the first live versions blocked benign hosts. Fine-tuning, mean host scores, persistence, packet-rate meters and priorities by severity were needed to reach 12/12 mitigated runs with 94.7\% of attack traffic dropped and no false blocks.
+\end{description}
+
+\section{Recommendations for Deployment}
+Based on the experience of the project, an operator who wants to use this system in a real SDN should:
+\begin{enumerate}
+	\item \textbf{Calibrate} the model with a few hours of the network's own benign traffic and with the attack tools of the laboratory, because a model trained on a public dataset will not transfer unchanged.
+	\item \textbf{Start in detect-only mode} (\texttt{IDS\_MITIGATION=0}), review the alerts and the suspicious log, and enable blocking only when the false-alert rate is acceptable.
+	\item \textbf{Fill the whitelist} with the controller, gateways, DNS servers and monitoring hosts before enabling mitigation.
+	\item \textbf{Keep the rule timeouts short} and use the audit log and manual unblock for exceptions.
+	\item \textbf{Combine the system} with a mechanism against spoofed floods at the edge (SYN cookies, upstream filtering), because IP-based rules cannot protect legitimate clients during such an attack.
+	\item \textbf{Monitor} the latency and the polling interval; tune the interval and the confirmation windows together.
+\end{enumerate}
+
+\section{Roadmap for Future Work}
+\begin{table}[htbp]
+\centering
+\caption{Proposed future work, with expected benefit and effort}
+\label{tab:roadmap}
+\small
+\begin{tabularx}{\textwidth}{|p{4.2cm}|X|p{1.8cm}|p{1.6cm}|}
+\hline
+\textbf{Work item} & \textbf{Expected benefit} & \textbf{Priority} & \textbf{Effort} \\ \hline
+Event-driven detection (packet-in rate trigger, shorter polling) & Reduces the median time to mitigation from seconds to below one second & High & Medium \\ \hline
+Temporal GNN over several windows & Detection of slow scans and multi-stage attacks & High & Medium \\ \hline
+More attack types and larger topologies in the laboratory & Stronger evidence; more training data for rare classes & High & Medium \\ \hline
+Self-supervised pre-training / domain adaptation & Less labelled data needed in a new network & Medium & High \\ \hline
+Explainability (attention-based explanations in the dashboard) & Operator trust; easier debugging of false blocks & Medium & Low \\ \hline
+Optimised feature computation (vectorised or compiled) & Lower latency for windows of thousands of flows & Medium & Low \\ \hline
+Adversarial robustness tests & Understand evasion and poisoning risks & Medium & Medium \\ \hline
+SYN-cookie or proxy integration for spoofed DDoS & Protects legitimate clients during floods & Medium & High \\ \hline
+Hardware switches and ONOS / multi-controller & Validation outside the emulator & Low & High \\ \hline
+\end{tabularx}
+\end{table}
+
+\section{Limitations of the project}
+\begin{itemize}
+	\item \textbf{Single dataset and an emulated network.} Training data come from InSDN; the model needed fine-tuning on laboratory traffic before it could be used live. The evaluation used a small topology (2 switches, 6 hosts) and four attack types. No hardware switches or production traffic were used.
+	\item \textbf{Rare classes.} WebAttack, Botnet and Other have 1--9 test windows, and the GAT does not detect BruteForce, WebAttack and Botnet windows reliably (the tree baselines do). Attacks that differ only in packet content cannot be distinguished by OpenFlow counters.
+	\item \textbf{Modest gain over strong baselines.} The baselines are already close to 0.97 macro-F1 on InSDN, so the 15--25\% F1 improvement proposed at the beginning could not be demonstrated; the improvement is a reduction of the error rate from 3.0\% to 2.2\% and a better host identification.
+	\item \textbf{Reaction time.} The model is fast (6.5~ms), but the end-to-end time to mitigation has a median of 4.5~s, determined by the 2~s polling interval, the 10~s window and the two-window confirmation; the target of two controller round-trips (about 100~ms) was not reached. For Probe attacks the first scan finishes before the rule is installed.
+	\item \textbf{Spoofed DDoS.} IP-based rules cannot separate spoofed from legitimate sources; victim rate-limiting stops the flood but legitimate clients keep only about 3\% of their traffic during the attack.
+	\item \textbf{Security of the IDS itself.} The system does not defend against an adversary who crafts traffic to evade the model, or who poisons the training data, and it does not authenticate the controller--IDS channel beyond a shared API key.
+	\item \textbf{Scope of the live evaluation.} Twelve attack runs and a limited number of benign-only runs give indicative, not statistically strong, estimates of the false-block rate.
+\end{itemize}
+
+\section{Scope for future work}
+\begin{itemize}
+	\item \textbf{Faster reaction.} Use event-driven detection (for example packet-in rate or flow-table growth as a trigger), shorter polling and incremental graph updates, and evaluate the detection--false-alarm trade-off.
+	\item \textbf{Temporal models.} Stack several consecutive graph snapshots with a GRU or a temporal GNN to detect slow and multi-stage attacks such as low-rate scans and lateral movement.
+	\item \textbf{More data and attacks.} Add the CICIDS2017 \emph{TrafficLabelling} files (which contain IP addresses), newer SDN datasets and more laboratory attack types (slowloris, DNS and NTP amplification, application-layer attacks), and larger topologies with more switches.
+	\item \textbf{Robustness to domain shift.} Self-supervised pre-training, domain adaptation or online learning, so that a deployment needs less labelled local data.
+	\item \textbf{Adversarial robustness and explainability.} Evaluate evasion attacks against the GNN and use attention weights or GNNExplainer-style methods to show the operator why a host was flagged.
+	\item \textbf{Better DDoS protection.} Combine the victim rate limit with SYN-cookie or proxy mechanisms, or with upstream filtering, to preserve legitimate service during spoofed floods.
+	\item \textbf{Hardware and multi-controller deployment.} Test on physical OpenFlow switches, with ONOS or a distributed controller, and with the IDS service replicated for availability.
+\end{itemize}

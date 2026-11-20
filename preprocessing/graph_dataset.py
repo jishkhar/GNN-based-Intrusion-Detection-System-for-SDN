@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+
 from dataclasses import dataclass
 
 import torch
@@ -176,6 +178,26 @@ def apply_feature_stats(graph, stats: GraphFeatureStats):
     ):
         graph.edge_attr = (_signed_log1p(graph.edge_attr.float()) - stats.edge_mean) / stats.edge_std
     return graph
+
+
+def select_graph_features(graphs, selection: dict | None):
+    """Keep only the selected feature columns (``{"node": [idx], "edge": [idx]}``); ``None`` keeps all.
+
+    Graph files always hold the full feature set; the selection is applied when a
+    model is trained / evaluated / served, and is stored with the model.
+    """
+    if not selection:
+        return graphs
+    node_idx, edge_idx = selection.get("node"), selection.get("edge")
+    out = []
+    for g in graphs:
+        h = copy.copy(g)  # shallow: only x / edge_attr are replaced
+        if node_idx is not None:
+            h.x = g.x[:, node_idx]
+        if edge_idx is not None and getattr(g, "edge_attr", None) is not None:
+            h.edge_attr = g.edge_attr[:, edge_idx]
+        out.append(h)
+    return out
 
 
 def apply_stats_to_graphs(graphs, stats: GraphFeatureStats):
